@@ -2,6 +2,17 @@ import javax.swing.*;
 import java.awt.*;
 import java.io.*;
 import java.net.Socket;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.nio.charset.StandardCharsets;
 
 public class POP3Client extends JFrame {
@@ -13,6 +24,7 @@ public class POP3Client extends JFrame {
     private JTextField txtAuthServer, txtAuthPort, txtAuthEmail;
     private JPasswordField txtAuthPassword;
     private JLabel lblAuthStatus;
+    private JButton btnScan;
 
     // Thông tin phiên đăng nhập
     private String loggedInServer;
@@ -45,7 +57,7 @@ public class POP3Client extends JFrame {
         wrapper.setBackground(new Color(240, 244, 248));
 
         JPanel card = new JPanel(new BorderLayout(10, 15));
-        card.setPreferredSize(new Dimension(500, 350));
+        card.setPreferredSize(new Dimension(620, 350));
         card.setBackground(Color.WHITE);
         card.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(new Color(200, 210, 220), 1),
@@ -90,6 +102,8 @@ public class POP3Client extends JFrame {
         btnLogin.setBackground(new Color(37, 99, 235));
         btnLogin.setForeground(Color.WHITE);
         btns.add(btnLogin);
+        btnScan = new JButton("Tự động quét Server LAN");
+        btns.add(btnScan);
         btns.add(btnHelp);
 
         south.add(lblAuthStatus);
@@ -99,6 +113,7 @@ public class POP3Client extends JFrame {
         wrapper.add(card);
 
         btnLogin.addActionListener(e -> performPop3Login());
+        btnScan.addActionListener(e -> autoScanLanServer());
         btnHelp.addActionListener(e -> showHelpDialog());
 
         return wrapper;
@@ -261,6 +276,117 @@ public class POP3Client extends JFrame {
                 SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Lỗi khi xóa thư: " + ex.getMessage()));
             }
         }).start();
+    }
+
+    // ==================== TỰ ĐỘNG DÒ TÌM SERVER TRONG MẠNG LAN ====================
+    private void autoScanLanServer() {
+        final int port;
+        try {
+            port = Integer.parseInt(txtAuthPort.getText().trim());
+        } catch (NumberFormatException ex) {
+            lblAuthStatus.setText("Cổng không hợp lệ, vui lòng nhập số!");
+            return;
+        }
+
+        btnScan.setEnabled(false);
+        lblAuthStatus.setText("Đang quét tìm Server trong mạng LAN (cổng " + port + ")...");
+
+        new Thread(() -> {
+            ExecutorService pool = Executors.newFixedThreadPool(64);
+            List<String> found = Collections.synchronizedList(new ArrayList<>());
+            try {
+                // 1. Xác định dải mạng (subnet) từ IP LAN của máy hiện tại, VD: "192.168.43."
+                String localIp = getLocalIPv4();
+                String subnet = localIp.substring(0, localIp.lastIndexOf('.') + 1);
+
+                // 2. Quét .1 -> .254 song song bằng thread pool, mỗi máy chỉ chờ tối đa vài trăm ms
+                List<Callable<Void>> tasks = new ArrayList<>();
+                for (int i = 1; i < 255; i++) {
+                    final String targetIp = subnet + i;
+                    tasks.add(() -> {
+                        if (isMailServer(targetIp, port)) found.add(targetIp);
+                        return null;
+                    });
+                }
+                pool.invokeAll(tasks);
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> {
+                    lblAuthStatus.setText("Lỗi quét mạng LAN: " + e.getMessage());
+                    btnScan.setEnabled(true);
+                });
+                return;
+            } finally {
+                pool.shutdownNow();
+            }
+
+            // 3. Hiển thị kết quả (chỉ 1 hộp thoại duy nhất, không bị spam)
+            List<String> result = new ArrayList<>(found);
+            Collections.sort(result);
+            SwingUtilities.invokeLater(() -> {
+                btnScan.setEnabled(true);
+                if (result.isEmpty()) {
+                    lblAuthStatus.setText("Không tìm thấy Server nào ở cổng " + port + " trong mạng LAN.");
+                    JOptionPane.showMessageDialog(this,
+                            "Không tìm thấy Mail Server nào trong mạng LAN.\n"
+                                    + "- Kiểm tra LANMailServer đã chạy chưa.\n"
+                                    + "- Kiểm tra cả hai máy cùng mạng Wi-Fi/LAN và Firewall đã cho phép cổng " + port + ".",
+                            "Quét LAN", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                String chosen = result.get(0);
+                if (result.size() > 1) {
+                    Object sel = JOptionPane.showInputDialog(this, "Tìm thấy " + result.size() + " Server, chọn 1 máy:",
+                            "Quét LAN", JOptionPane.QUESTION_MESSAGE, null, result.toArray(), chosen);
+                    if (sel == null) {
+                        lblAuthStatus.setText("Đã hủy chọn Server.");
+                        return;
+                    }
+                    chosen = sel.toString();
+                }
+                txtAuthServer.setText(chosen);
+                lblAuthStatus.setText("Đã tìm thấy Server tại: " + chosen);
+                JOptionPane.showMessageDialog(this, "Đã tự động tìm thấy Mail Server tại IP: " + chosen);
+            });
+        }).start();
+    }
+
+    // Kiểm tra ip:port có thật sự là Mail Server không (đọc lời chào của server, không chỉ mở cổng)
+    private boolean isMailServer(String ip, int port) {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(ip, port), 250);
+            s.setSoTimeout(600);
+            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
+            String greeting = in.readLine();
+            try {
+                OutputStream os = s.getOutputStream();
+                os.write("QUIT\r\n".getBytes(StandardCharsets.UTF_8));
+                os.flush();
+            } catch (IOException ignored) { }
+            return greeting != null && greeting.startsWith("+OK");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // Lấy IPv4 LAN thật của máy hiện tại (bỏ qua card ảo VMware/Docker/WSL...)
+    private static String getLocalIPv4() {
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                NetworkInterface iface = interfaces.nextElement();
+                if (iface.isLoopback() || !iface.isUp() || iface.isVirtual()) continue;
+                String name = iface.getDisplayName().toLowerCase();
+                if (name.contains("vmware") || name.contains("virtual") || name.contains("wsl") || name.contains("docker")) continue;
+                Enumeration<InetAddress> addrs = iface.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress a = addrs.nextElement();
+                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) return a.getHostAddress();
+                }
+            }
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (Exception e) {
+            return "127.0.0.1";
+        }
     }
 
     private void showHelpDialog() {
