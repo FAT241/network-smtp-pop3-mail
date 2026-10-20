@@ -19,8 +19,8 @@ public class LANMailServer extends JFrame {
     private String serverLanIp;
 
     public LANMailServer() {
-        setTitle("LAN Mail Server (SMTP Port 2525 & POP3 Port 1110) - Chạy đa máy qua mạng LAN");
-        setSize(850, 550);
+        setTitle("LAN Mail Server - SMTP (Port 2525) & POP3 (Port 1110)");
+        setSize(900, 600);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout(8, 8));
@@ -28,17 +28,17 @@ public class LANMailServer extends JFrame {
         initStorage();
         serverLanIp = getRealLanIPv4();
 
-        // Panel hiển thị IP LAN nổi bật ở trên cùng để các máy khác nhập vào
+        // Panel hiển thị IP LAN ở trên cùng
         JPanel topPanel = new JPanel(new GridLayout(2, 1, 5, 5));
         topPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 5, 10));
         topPanel.setBackground(new Color(230, 245, 255));
 
-        lblLanIp = new JLabel("ĐỊA CHỈ IP LAN CỦA SERVER NÀY: " + serverLanIp, SwingConstants.CENTER);
+        lblLanIp = new JLabel("ĐỊA CHỈ IP LAN CỦA SERVER: " + serverLanIp, SwingConstants.CENTER);
         lblLanIp.setFont(new Font("SansSerif", Font.BOLD, 18));
         lblLanIp.setForeground(new Color(0, 102, 204));
 
         JLabel lblGuide = new JLabel(
-                "-> Trên các máy tính khác cùng mạng Wi-Fi/LAN, hãy nhập Host là [" + serverLanIp + "] (SMTP Port: 2525 | POP3 Port: 1110)",
+                "-> Các máy client trong mạng LAN nhập Host là [" + serverLanIp + "] (SMTP: 2525 | POP3: 1110)",
                 SwingConstants.CENTER
         );
         lblGuide.setFont(new Font("SansSerif", Font.PLAIN, 13));
@@ -47,31 +47,27 @@ public class LANMailServer extends JFrame {
         topPanel.add(lblGuide);
         add(topPanel, BorderLayout.NORTH);
 
-        // Khu vực nhật ký kết nối từ các máy khác trong mạng LAN
+        // Khu vực nhật ký kết nối
         txtServerLog = new JTextArea();
         txtServerLog.setEditable(false);
-        txtServerLog.setFont(new Font("Monospaced", Font.PLAIN, 13));
+        txtServerLog.setFont(new Font("Consolas", Font.PLAIN, 13));
         JScrollPane scrollLog = new JScrollPane(txtServerLog);
-        scrollLog.setBorder(BorderFactory.createTitledBorder("Nhật ký kết nối trực tiếp từ các máy trong mạng LAN"));
+        scrollLog.setBorder(BorderFactory.createTitledBorder("Nhật ký kết nối trực tiếp từ các máy Client trong mạng LAN"));
         add(scrollLog, BorderLayout.CENTER);
 
-        // Khởi động cả 2 dịch vụ SMTP và POP3 lắng nghe toàn mạng LAN (0.0.0.0)
+        // Khởi động 2 luồng Server lắng nghe trên 0.0.0.0
         new Thread(this::startSmtpServer).start();
         new Thread(this::startPop3Server).start();
     }
 
-    // Hàm tự động lấy đúng IPv4 của card Wi-Fi / Ethernet (Bỏ qua 127.0.0.1 và card ảo VMware/WSL/Docker)
     public static String getRealLanIPv4() {
         try {
             Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
                 NetworkInterface iface = interfaces.nextElement();
                 if (iface.isLoopback() || !iface.isUp() || iface.isVirtual()) continue;
-
                 String name = iface.getDisplayName().toLowerCase();
-                if (name.contains("vmware") || name.contains("virtual") || name.contains("wsl") || name.contains("docker") || name.contains("vbox")) {
-                    continue;
-                }
+                if (name.contains("vmware") || name.contains("virtual") || name.contains("wsl") || name.contains("docker")) continue;
 
                 Enumeration<InetAddress> addresses = iface.getInetAddresses();
                 while (addresses.hasMoreElements()) {
@@ -122,14 +118,14 @@ public class LANMailServer extends JFrame {
         return map;
     }
 
-    // ==================== SMTP SERVER (LẮNG NGHE MỌI MÁY TRONG LAN) ====================
+    // ==================== SMTP SERVER (PORT 2525) ====================
     private void startSmtpServer() {
         try (ServerSocket serverSocket = new ServerSocket(SMTP_PORT, 50, InetAddress.getByName("0.0.0.0"))) {
-            log("[SMTP Server] Đang mở trên " + serverLanIp + ":" + SMTP_PORT + " (Chấp nhận mọi máy trong LAN)");
+            log("[SMTP Server] Đang mở trên cổng " + SMTP_PORT + " (Chấp nhận kết nối LAN)");
             while (true) {
                 Socket client = serverSocket.accept();
                 String clientIp = client.getInetAddress().getHostAddress();
-                log("\n---> [SMTP] Có kết nối mới từ máy khách IP: " + clientIp);
+                log("\n---> [SMTP] Kết nối từ máy IP: " + clientIp);
                 new Thread(() -> handleSmtpClient(client, clientIp)).start();
             }
         } catch (IOException e) {
@@ -156,52 +152,52 @@ public class LANMailServer extends JFrame {
                 if (upper.startsWith("REGISTER ")) {
                     String[] parts = line.split(" ", 3);
                     if (parts.length == 3 && registerUser(parts[1], parts[2])) {
-                        log("   + Máy " + clientIp + " vừa tạo tài khoản mới: " + parts[1]);
-                        out.print("250 Dang ky tai khoan thanh cong: " + parts[1] + "\r\n");
+                        log("   + Đăng ký thành công tài khoản: " + parts[1]);
+                        out.print("250 Dang ky thanh cong\r\n");
                     } else {
                         out.print("550 Tai khoan da ton tai hoac sai cu phap\r\n");
                     }
                 } else if (upper.startsWith("HELO") || upper.startsWith("EHLO")) {
                     out.print("250 Hello " + clientIp + ", AUTH LOGIN supported\r\n");
                 } else if (upper.equals("AUTH LOGIN")) {
-                    out.print("334 VXNlcm5hbWU6\r\n");
+                    out.print("334 VXNlcm5hbWU6\r\n"); // "Username:"
                     out.flush();
                     String user = new String(Base64.getDecoder().decode(in.readLine().trim()), StandardCharsets.UTF_8).toLowerCase();
 
-                    out.print("334 UGFzc3dvcmQ6\r\n");
+                    out.print("334 UGFzc3dvcmQ6\r\n"); // "Password:"
                     out.flush();
                     String pass = new String(Base64.getDecoder().decode(in.readLine().trim()), StandardCharsets.UTF_8);
 
                     Map<String, String> accounts = loadAccounts();
                     if (accounts.containsKey(user) && accounts.get(user).equals(pass)) {
                         authenticated = true;
-                        log("   + Máy " + clientIp + " đăng nhập SMTP thành công với user: " + user);
-                        out.print("235 Dang nhap thanh cong\r\n");
+                        log("   + Xác thực AUTH LOGIN thành công cho user: " + user);
+                        out.print("235 2.7.0 Authentication successful\r\n");
                     } else {
-                        out.print("535 Sai tai khoan hoac mat khau\r\n");
+                        out.print("535 5.7.8 Authentication failed\r\n");
                     }
                 } else if (upper.startsWith("MAIL FROM:")) {
                     if (!authenticated) {
-                        out.print("530 Vui long dang nhap AUTH LOGIN truoc\r\n");
+                        out.print("530 Authentication required before sending mail\r\n");
                     } else {
                         sender = line.substring(10).replace("<", "").replace(">", "").trim().toLowerCase();
                         recipients.clear();
-                        out.print("250 Sender OK (" + sender + ")\r\n");
+                        out.print("250 2.1.0 Sender OK\r\n");
                     }
                 } else if (upper.startsWith("RCPT TO:")) {
                     String rcpt = line.substring(8).replace("<", "").replace(">", "").trim().toLowerCase();
                     Map<String, String> accounts = loadAccounts();
                     if (!accounts.containsKey(rcpt)) {
-                        out.print("550 Nguoi nhan khong ton tai tren Server: " + rcpt + "\r\n");
+                        out.print("550 5.1.1 User unknown: " + rcpt + "\r\n");
                     } else {
                         recipients.add(rcpt);
-                        out.print("250 Recipient OK (" + rcpt + ")\r\n");
+                        out.print("250 2.1.5 Recipient OK\r\n");
                     }
                 } else if (upper.equals("DATA")) {
                     if (sender == null || recipients.isEmpty()) {
-                        out.print("503 Chua nhap MAIL FROM hoac RCPT TO\r\n");
+                        out.print("503 Bad sequence of commands\r\n");
                     } else {
-                        out.print("354 Nhap noi dung thu, ket thuc bang dau cham '.' tren 1 dong\r\n");
+                        out.print("354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
                         out.flush();
                         StringBuilder content = new StringBuilder();
                         String dataLine;
@@ -215,15 +211,15 @@ public class LANMailServer extends JFrame {
                             File mailFile = new File(userBox, "mail_" + System.currentTimeMillis() + ".txt");
                             Files.write(mailFile.toPath(), content.toString().getBytes(StandardCharsets.UTF_8));
                         }
-                        log("   + Đã nhận thư từ " + sender + " (" + clientIp + ") gửi tới " + recipients);
-                        out.print("250 Da luu thu vao hop thu cua " + recipients + "\r\n");
+                        log("   + Đã lưu thư từ [" + sender + "] gửi tới: " + recipients);
+                        out.print("250 2.0.0 Message accepted for delivery\r\n");
                     }
                 } else if (upper.equals("QUIT")) {
-                    out.print("221 Dong ket noi SMTP\r\n");
+                    out.print("221 2.0.0 Service closing transmission channel\r\n");
                     out.flush();
                     break;
                 } else {
-                    out.print("500 Lenh khong hop le\r\n");
+                    out.print("500 Command not recognized\r\n");
                 }
                 out.flush();
             }
@@ -232,14 +228,14 @@ public class LANMailServer extends JFrame {
         }
     }
 
-    // ==================== POP3 SERVER (LẮNG NGHE MỌI MÁY TRONG LAN) ====================
+    // ==================== POP3 SERVER (PORT 1110) ====================
     private void startPop3Server() {
         try (ServerSocket serverSocket = new ServerSocket(POP3_PORT, 50, InetAddress.getByName("0.0.0.0"))) {
-            log("[POP3 Server] Đang mở trên " + serverLanIp + ":" + POP3_PORT + " (Chấp nhận mọi máy trong LAN)");
+            log("[POP3 Server] Đang mở trên cổng " + POP3_PORT + " (Chấp nhận kết nối LAN)");
             while (true) {
                 Socket client = serverSocket.accept();
                 String clientIp = client.getInetAddress().getHostAddress();
-                log("\n---> [POP3] Có kết nối mới từ máy khách IP: " + clientIp);
+                log("\n---> [POP3] Kết nối từ máy IP: " + clientIp);
                 new Thread(() -> handlePop3Client(client, clientIp)).start();
             }
         } catch (IOException e) {
@@ -251,7 +247,7 @@ public class LANMailServer extends JFrame {
         try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
              PrintWriter out = new PrintWriter(new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
-            out.print("+OK " + serverLanIp + " LAN POP3 Server Ready\r\n");
+            out.print("+OK LAN POP3 Server Ready\r\n");
             out.flush();
 
             String currentUser = null;
@@ -267,9 +263,9 @@ public class LANMailServer extends JFrame {
                     currentUser = line.substring(5).trim().toLowerCase();
                     Map<String, String> accounts = loadAccounts();
                     if (accounts.containsKey(currentUser)) {
-                        out.print("+OK Tai khoan hop le, vui long nhap PASS\r\n");
+                        out.print("+OK User accepted\r\n");
                     } else {
-                        out.print("-ERR Tai khoan khong ton tai\r\n");
+                        out.print("-ERR User does not exist\r\n");
                     }
                 } else if (upper.startsWith("PASS ")) {
                     String pass = line.substring(5).trim();
@@ -280,13 +276,13 @@ public class LANMailServer extends JFrame {
                         File[] files = userDir.listFiles((dir, name) -> name.endsWith(".txt"));
                         mailFiles = (files != null) ? new ArrayList<>(Arrays.asList(files)) : new ArrayList<>();
                         mailFiles.sort(Comparator.comparing(File::getName));
-                        log("   + Máy " + clientIp + " đăng nhập POP3 thành công (" + currentUser + ")");
-                        out.print("+OK Dang nhap thanh cong, co " + mailFiles.size() + " thu\r\n");
+                        log("   + Đăng nhập POP3 thành công cho hộp thư: " + currentUser);
+                        out.print("+OK Mailbox locked and ready (" + mailFiles.size() + " messages)\r\n");
                     } else {
-                        out.print("-ERR Sai mat khau\r\n");
+                        out.print("-ERR Invalid password\r\n");
                     }
                 } else if (!authenticated) {
-                    out.print("-ERR Vui long dang nhap USER va PASS truoc\r\n");
+                    out.print("-ERR Please login with USER and PASS first\r\n");
                 } else if (upper.equals("STAT")) {
                     long totalBytes = mailFiles.stream().mapToLong(File::length).sum();
                     out.print("+OK " + mailFiles.size() + " " + totalBytes + "\r\n");
@@ -306,19 +302,28 @@ public class LANMailServer extends JFrame {
                         if (!content.endsWith("\r\n")) out.print("\r\n");
                         out.print(".\r\n");
                     } else {
-                        out.print("-ERR Khong tim thay thu\r\n");
+                        out.print("-ERR No such message\r\n");
+                    }
+                } else if (upper.startsWith("DELE ")) {
+                    int idx = Integer.parseInt(line.substring(5).trim()) - 1;
+                    if (idx >= 0 && idx < mailFiles.size()) {
+                        mailFiles.get(idx).delete();
+                        log("   + Đã xóa bức thư số #" + (idx + 1) + " trong hộp thư của " + currentUser);
+                        out.print("+OK Message deleted\r\n");
+                    } else {
+                        out.print("-ERR Message does not exist\r\n");
                     }
                 } else if (upper.equals("QUIT")) {
-                    out.print("+OK POP3 Server Tam biet\r\n");
+                    out.print("+OK POP3 server signing off\r\n");
                     out.flush();
                     break;
                 } else {
-                    out.print("-ERR Lenh POP3 khong hop le\r\n");
+                    out.print("-ERR Unknown POP3 command\r\n");
                 }
                 out.flush();
             }
         } catch (Exception e) {
-            log("[POP3 Ngắt kết nối từ " + clientIp + "]: " + e.getMessage());
+            log("[POP3 Ngắt kết nối]: " + e.getMessage());
         }
     }
 

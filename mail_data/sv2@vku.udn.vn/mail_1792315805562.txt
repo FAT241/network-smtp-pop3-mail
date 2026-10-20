@@ -1,6 +1,0 @@
-From: sv1@vku.udn.vn
-To: sv2@vku.udn.vn
-Subject: Thử nghiệm gửi thư có xác thực đăng nhập
-
-Xin chao,
-Day la email duoc gui sau khi xac thuc AUTH LOGIN thanh cong!
