@@ -1,7 +1,0 @@
-From: sv3@vku.udn.vn
-To: sv2@vku.udn.vn
-Subject: Bao cao Bai Lab Giao thuc SMTP & POP3
-
-Xin chao,
-Day la thu duoc gui tu SMTP Client sau khi xac thuc AUTH LOGIN thanh cong!
-M gay à

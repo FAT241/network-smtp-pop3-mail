@@ -4,6 +4,8 @@ import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.List;
 
@@ -12,7 +14,7 @@ public class LANMailServer extends JFrame {
     public static final int SMTP_PORT = 2525;
     public static final int POP3_PORT = 1110;
     public static final File DATA_DIR = new File("mail_data");
-    public static final File ACCOUNTS_FILE = new File(DATA_DIR, "accounts.txt");
+    public static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
 
     private JTextArea txtServerLog;
     private JLabel lblLanIp;
@@ -83,37 +85,61 @@ public class LANMailServer extends JFrame {
         }
     }
 
+    // Khởi tạo thư mục gốc và 2 tài khoản mẫu
     public static void initStorage() {
         try {
             if (!DATA_DIR.exists()) DATA_DIR.mkdirs();
-            if (!ACCOUNTS_FILE.exists()) {
-                registerUser("sv1@vku.udn.vn", "123456");
-                registerUser("sv2@vku.udn.vn", "123456");
-            }
+            registerUser("sv1@vku.udn.vn", "123456");
+            registerUser("sv2@vku.udn.vn", "123456");
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
+    // Tạo thư mục riêng cho từng tài khoản và lưu file account_info.txt bên trong
     public static synchronized boolean registerUser(String email, String password) throws IOException {
         email = email.toLowerCase().trim();
-        Map<String, String> accounts = loadAccounts();
-        if (accounts.containsKey(email)) return false;
-
-        try (FileWriter fw = new FileWriter(ACCOUNTS_FILE, true)) {
-            fw.write(email + ":" + password + "\n");
-        }
         File userMailbox = new File(DATA_DIR, email);
+        File accountInfoFile = new File(userMailbox, "account_info.txt");
+
+        // Nếu đã có file account_info.txt thì tài khoản đã tồn tại
+        if (accountInfoFile.exists()) return false;
+
         if (!userMailbox.exists()) userMailbox.mkdirs();
+
+        String createdTime = LocalDateTime.now().format(TIME_FMT);
+        String infoContent = "Tên tài khoản: " + email + "\r\n"
+                           + "Thời gian tạo: " + createdTime + "\r\n"
+                           + "Mật khẩu: " + password + "\r\n";
+
+        Files.write(accountInfoFile.toPath(), infoContent.getBytes(StandardCharsets.UTF_8));
         return true;
     }
 
+    // Đọc danh sách tài khoản từ file account_info.txt trong từng thư mục con
     public static synchronized Map<String, String> loadAccounts() throws IOException {
         Map<String, String> map = new HashMap<>();
-        if (!ACCOUNTS_FILE.exists()) return map;
-        for (String line : Files.readAllLines(ACCOUNTS_FILE.toPath(), StandardCharsets.UTF_8)) {
-            String[] parts = line.split(":", 2);
-            if (parts.length == 2) map.put(parts[0].trim(), parts[1].trim());
+        if (!DATA_DIR.exists()) return map;
+
+        File[] userFolders = DATA_DIR.listFiles(File::isDirectory);
+        if (userFolders == null) return map;
+
+        for (File folder : userFolders) {
+            File infoFile = new File(folder, "account_info.txt");
+            if (infoFile.exists()) {
+                String email = null;
+                String pass = null;
+                for (String line : Files.readAllLines(infoFile.toPath(), StandardCharsets.UTF_8)) {
+                    if (line.startsWith("Tên tài khoản:")) {
+                        email = line.substring("Tên tài khoản:".length()).trim().toLowerCase();
+                    } else if (line.startsWith("Mật khẩu:")) {
+                        pass = line.substring("Mật khẩu:".length()).trim();
+                    }
+                }
+                if (email != null && pass != null) {
+                    map.put(email, pass);
+                }
+            }
         }
         return map;
     }
@@ -152,7 +178,7 @@ public class LANMailServer extends JFrame {
                 if (upper.startsWith("REGISTER ")) {
                     String[] parts = line.split(" ", 3);
                     if (parts.length == 3 && registerUser(parts[1], parts[2])) {
-                        log("   + Đăng ký thành công tài khoản: " + parts[1]);
+                        log("   + Đăng ký thành công tài khoản: " + parts[1] + " (Đã tạo account_info.txt)");
                         out.print("250 Dang ky thanh cong\r\n");
                     } else {
                         out.print("550 Tai khoan da ton tai hoac sai cu phap\r\n");
@@ -199,17 +225,41 @@ public class LANMailServer extends JFrame {
                     } else {
                         out.print("354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
                         out.flush();
-                        StringBuilder content = new StringBuilder();
+
+                        String subject = "(Không có tiêu đề)";
+                        StringBuilder bodyBuilder = new StringBuilder();
+                        boolean inBody = false;
+
                         String dataLine;
                         while ((dataLine = in.readLine()) != null) {
                             if (dataLine.equals(".")) break;
-                            content.append(dataLine).append("\r\n");
+
+                            if (!inBody) {
+                                if (dataLine.isEmpty()) {
+                                    inBody = true; // Bắt đầu vào phần Nội dung sau dòng trống
+                                } else if (dataLine.toLowerCase().startsWith("subject:")) {
+                                    subject = dataLine.substring(8).trim();
+                                }
+                            } else {
+                                bodyBuilder.append(dataLine).append("\r\n");
+                            }
                         }
+
+                        String sendTime = LocalDateTime.now().format(TIME_FMT);
+                        String bodyContent = bodyBuilder.toString().trim();
+
                         for (String rcpt : recipients) {
                             File userBox = new File(DATA_DIR, rcpt);
                             if (!userBox.exists()) userBox.mkdirs();
+
+                            String formattedMail = "Thời gian gửi: " + sendTime + "\r\n"
+                                                 + "Người gửi: " + sender + "\r\n"
+                                                 + "Người nhận: " + rcpt + "\r\n"
+                                                 + "Tiêu đề: " + subject + "\r\n"
+                                                 + "Nội dung:\r\n" + bodyContent + "\r\n";
+
                             File mailFile = new File(userBox, "mail_" + System.currentTimeMillis() + ".txt");
-                            Files.write(mailFile.toPath(), content.toString().getBytes(StandardCharsets.UTF_8));
+                            Files.write(mailFile.toPath(), formattedMail.getBytes(StandardCharsets.UTF_8));
                         }
                         log("   + Đã lưu thư từ [" + sender + "] gửi tới: " + recipients);
                         out.print("250 2.0.0 Message accepted for delivery\r\n");
@@ -273,7 +323,8 @@ public class LANMailServer extends JFrame {
                     if (currentUser != null && accounts.containsKey(currentUser) && accounts.get(currentUser).equals(pass)) {
                         authenticated = true;
                         File userDir = new File(DATA_DIR, currentUser);
-                        File[] files = userDir.listFiles((dir, name) -> name.endsWith(".txt"));
+                        // Chỉ lọc các file tin nhắn bắt đầu bằng "mail_" để không lấy nhầm file "account_info.txt"
+                        File[] files = userDir.listFiles((dir, name) -> name.startsWith("mail_") && name.endsWith(".txt"));
                         mailFiles = (files != null) ? new ArrayList<>(Arrays.asList(files)) : new ArrayList<>();
                         mailFiles.sort(Comparator.comparing(File::getName));
                         log("   + Đăng nhập POP3 thành công cho hộp thư: " + currentUser);

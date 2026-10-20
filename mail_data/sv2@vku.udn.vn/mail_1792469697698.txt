@@ -1,6 +1,0 @@
-From: sv1@vku.udn.vn
-To: sv2@vku.udn.vn
-Subject: Bao cao Bai Lab Giao thuc SMTP & POP3
-
-Chao ban,
-Day la thu gui qua mang LAN bang giao thuc SMTP (TCP Socket)!
