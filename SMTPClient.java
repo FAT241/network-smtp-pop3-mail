@@ -2,6 +2,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.io.*;
 import java.net.Socket;
+import javax.net.ssl.SSLSocketFactory;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -17,6 +18,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 public class SMTPClient extends JFrame {
+
+    private Socket createSmtpSocket(String host, int port) throws IOException {
+        if (port == 465 || host.toLowerCase().contains("gmail")) {
+            return SSLSocketFactory.getDefault().createSocket(host, port);
+        }
+        return new Socket(host, port);
+    }
+
 
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel mainContainer = new JPanel(cardLayout);
@@ -110,7 +119,25 @@ public class SMTPClient extends JFrame {
 
         JPanel helpPanel = new JPanel(new FlowLayout(FlowLayout.CENTER));
         helpPanel.setBackground(Color.WHITE);
-        btnScan = new JButton("Tự động quét Server LAN");
+        JButton btnModeLocal = new JButton("💻 Cổng 2525 (Local)");
+        btnModeLocal.addActionListener(e -> {
+            txtAuthServer.setText("localhost");
+            txtAuthPort.setText("2525");
+            txtAuthEmail.setText("sv1@vku.udn.vn");
+            txtAuthPassword.setText("123456");
+            lblAuthStatus.setText("Đã chọn chế độ Local LAN Mail Server.");
+        });
+        JButton btnModeGmail = new JButton("🌐 Cổng 465 (Gmail Thật)");
+        btnModeGmail.addActionListener(e -> {
+            txtAuthServer.setText("smtp.gmail.com");
+            txtAuthPort.setText("465");
+            txtAuthEmail.setText("");
+            txtAuthPassword.setText("");
+            lblAuthStatus.setText("Đã chọn Gmail. Lưu ý: Mật khẩu là App Password 16 số của Google.");
+        });
+        helpPanel.add(btnModeLocal);
+        helpPanel.add(btnModeGmail);
+        btnScan = new JButton("Quét LAN");
         helpPanel.add(btnScan);
         helpPanel.add(btnHelp);
 
@@ -212,7 +239,7 @@ public class SMTPClient extends JFrame {
 
         lblAuthStatus.setText("Đang kết nối tới Server để đăng ký tài khoản...");
         new Thread(() -> {
-            try (Socket socket = new Socket(host, port);
+            try (Socket socket = createSmtpSocket(host, port);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
@@ -312,7 +339,7 @@ public class SMTPClient extends JFrame {
         btnSendMail.setEnabled(false);
 
         new Thread(() -> {
-            try (Socket socket = new Socket(loggedInServer, loggedInPort);
+            try (Socket socket = createSmtpSocket(loggedInServer, loggedInPort);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
@@ -326,7 +353,8 @@ public class SMTPClient extends JFrame {
                 out.flush();
                 readAndLog(in, "334");
 
-                String b64Pass = Base64.getEncoder().encodeToString(loggedInPassword.getBytes(StandardCharsets.UTF_8));
+                String cleanPass = loggedInPassword.trim().replace(" ", "");
+                String b64Pass = Base64.getEncoder().encodeToString(cleanPass.getBytes(StandardCharsets.UTF_8));
                 log("CLIENT: " + b64Pass + " (Base64 Pass)");
                 out.print(b64Pass + "\r\n");
                 out.flush();
