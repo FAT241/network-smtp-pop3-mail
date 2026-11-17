@@ -280,7 +280,7 @@ public class SMTPClient extends JFrame {
 
         lblAuthStatus.setText("Đang xác thực tài khoản với SMTP Server...");
         new Thread(() -> {
-            try (Socket socket = new Socket(host, port);
+            try (Socket socket = createSmtpSocket(host, port);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 

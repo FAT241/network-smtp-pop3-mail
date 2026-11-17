@@ -4,6 +4,7 @@ import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.sql.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -15,6 +16,15 @@ public class LANMailServer extends JFrame {
     public static final int POP3_PORT = 1110;
     public static final File DATA_DIR = new File("mail_data");
     public static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
+
+    // Cấu hình CSDL PostgreSQL (ưu tiên) và MySQL XAMPP
+    private static final String PG_URL = "jdbc:postgresql://127.0.0.1:5432/lab8_server1";
+    private static final String PG_USER = "lab8_server1";
+    private static final String PG_PASS = "Lab8_e03980b458a7046436b168e426cee1aa5f2db97cf615811f";
+
+    private static final String MYSQL_URL = "jdbc:mysql://localhost:3306/vku_network_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
+    private static final String MYSQL_USER = "root";
+    private static final String MYSQL_PASS = "";
 
     private JTextArea txtServerLog;
     private JLabel lblLanIp;
@@ -96,18 +106,46 @@ public class LANMailServer extends JFrame {
         }
     }
 
-    // Tạo thư mục riêng cho từng tài khoản và lưu file account_info.txt bên trong
+    // Tạo thư mục riêng cho từng tài khoản và lưu đồng thời vào PostgreSQL, MySQL và file hệ thống
     public static synchronized boolean registerUser(String email, String password) throws IOException {
         email = email.toLowerCase().trim();
+        String createdTime = LocalDateTime.now().format(TIME_FMT);
+
+        // 1. Lưu vào PostgreSQL
+        try {
+            Class.forName("org.postgresql.Driver");
+            try (Connection conn = DriverManager.getConnection(PG_URL, PG_USER, PG_PASS);
+                 PreparedStatement ps = conn.prepareStatement(
+                         "INSERT INTO mail_users (username, password, email, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (username) DO NOTHING")) {
+                ps.setString(1, email);
+                ps.setString(2, password);
+                ps.setString(3, email);
+                ps.setString(4, createdTime);
+                ps.executeUpdate();
+            }
+        } catch (Throwable ignored) {}
+
+        // 2. Lưu vào MySQL
+        try {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+            try (Connection conn = DriverManager.getConnection(MYSQL_URL, MYSQL_USER, MYSQL_PASS);
+                 PreparedStatement ps = conn.prepareStatement(
+                         "INSERT IGNORE INTO mail_users (username, password, email, created_at) VALUES (?, ?, ?, ?)")) {
+                ps.setString(1, email);
+                ps.setString(2, password);
+                ps.setString(3, email);
+                ps.setString(4, createdTime);
+                ps.executeUpdate();
+            }
+        } catch (Throwable ignored) {}
+
         File userMailbox = new File(DATA_DIR, email);
         File accountInfoFile = new File(userMailbox, "account_info.txt");
 
-        // Nếu đã có file account_info.txt thì tài khoản đã tồn tại
-        if (accountInfoFile.exists()) return false;
+        if (accountInfoFile.exists()) return true;
 
         if (!userMailbox.exists()) userMailbox.mkdirs();
 
-        String createdTime = LocalDateTime.now().format(TIME_FMT);
         String infoContent = "Tên tài khoản: " + email + "\r\n"
                            + "Thời gian tạo: " + createdTime + "\r\n"
                            + "Mật khẩu: " + password + "\r\n";
@@ -116,9 +154,38 @@ public class LANMailServer extends JFrame {
         return true;
     }
 
-    // Đọc danh sách tài khoản từ file account_info.txt trong từng thư mục con
+    // Đọc danh sách tài khoản: Ưu tiên PostgreSQL -> MySQL -> file account_info.txt
     public static synchronized Map<String, String> loadAccounts() throws IOException {
         Map<String, String> map = new HashMap<>();
+
+        // 1. Thử nạp từ PostgreSQL
+        try {
+            Class.forName("org.postgresql.Driver");
+            try (Connection conn = DriverManager.getConnection(PG_URL, PG_USER, PG_PASS);
+                 Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT username, password FROM mail_users")) {
+                while (rs.next()) {
+                    map.put(rs.getString("username").toLowerCase().trim(), rs.getString("password"));
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        if (!map.isEmpty()) return map;
+
+        // 2. Thử nạp từ MySQL
+        try {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+            try (Connection conn = DriverManager.getConnection(MYSQL_URL, MYSQL_USER, MYSQL_PASS);
+                 Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT username, password FROM mail_users")) {
+                while (rs.next()) {
+                    map.put(rs.getString("username").toLowerCase().trim(), rs.getString("password"));
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        if (!map.isEmpty()) return map;
+
         if (!DATA_DIR.exists()) return map;
 
         File[] userFolders = DATA_DIR.listFiles(File::isDirectory);
@@ -142,6 +209,43 @@ public class LANMailServer extends JFrame {
             }
         }
         return map;
+    }
+
+    // Lưu thư gửi vào CSDL PostgreSQL và MySQL
+    public static void saveEmailToDb(String sender, String receiver, String subject, String body, String timestamp) {
+        new Thread(() -> {
+            // 1. Ghi vào PostgreSQL (lab8_server1.mail_emails)
+            try {
+                Class.forName("org.postgresql.Driver");
+                try (Connection conn = DriverManager.getConnection(PG_URL, PG_USER, PG_PASS);
+                     PreparedStatement ps = conn.prepareStatement(
+                             "INSERT INTO mail_emails (sender, receiver, subject, body, timestamp, status) VALUES (?, ?, ?, ?, ?, ?)")) {
+                    ps.setString(1, sender);
+                    ps.setString(2, receiver);
+                    ps.setString(3, subject);
+                    ps.setString(4, body);
+                    ps.setString(5, timestamp);
+                    ps.setString(6, "DELIVERED");
+                    ps.executeUpdate();
+                }
+            } catch (Throwable ignored) {}
+
+            // 2. Ghi vào MySQL (vku_network_db.mail_emails)
+            try {
+                Class.forName("com.mysql.cj.jdbc.Driver");
+                try (Connection conn = DriverManager.getConnection(MYSQL_URL, MYSQL_USER, MYSQL_PASS);
+                     PreparedStatement ps = conn.prepareStatement(
+                             "INSERT INTO mail_emails (sender, receiver, subject, body, timestamp, status) VALUES (?, ?, ?, ?, ?, ?)")) {
+                    ps.setString(1, sender);
+                    ps.setString(2, receiver);
+                    ps.setString(3, subject);
+                    ps.setString(4, body);
+                    ps.setString(5, timestamp);
+                    ps.setString(6, "DELIVERED");
+                    ps.executeUpdate();
+                }
+            } catch (Throwable ignored) {}
+        }).start();
     }
 
     // ==================== SMTP SERVER (PORT 2525) ====================
@@ -260,6 +364,7 @@ public class LANMailServer extends JFrame {
 
                             File mailFile = new File(userBox, "mail_" + System.currentTimeMillis() + ".txt");
                             Files.write(mailFile.toPath(), formattedMail.getBytes(StandardCharsets.UTF_8));
+                            saveEmailToDb(sender, rcpt, subject, bodyContent, sendTime);
                         }
                         log("   + Đã lưu thư từ [" + sender + "] gửi tới: " + recipients);
                         out.print("250 2.0.0 Message accepted for delivery\r\n");
