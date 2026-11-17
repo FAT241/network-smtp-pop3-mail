@@ -53,6 +53,16 @@ final class MailStore {
                     )
                     """);
             sql.execute("CREATE INDEX IF NOT EXISTS mail_inbox ON mail_messages (recipient, id)");
+            sql.execute("""
+                    CREATE TABLE IF NOT EXISTS mail_sent (
+                        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        sender text NOT NULL REFERENCES mail_accounts(email),
+                        recipients text NOT NULL,
+                        content text NOT NULL,
+                        status text NOT NULL,
+                        created_at timestamptz NOT NULL DEFAULT now()
+                    )
+                    """);
             sql.execute("CREATE TABLE IF NOT EXISTS mail_imports (source text PRIMARY KEY)");
             importLegacy(db, Path.of("mail_data"));
             register(db, "sv1@vku.udn.vn", "123456");
@@ -96,6 +106,7 @@ final class MailStore {
     }
 
     boolean register(String email, String pass) throws SQLException {
+        try { MailMime.address(email); } catch (Exception e) { return false; }
         try (Connection db = connect()) {
             return register(db, email, pass);
         }
@@ -154,6 +165,66 @@ final class MailStore {
             }
             db.commit();
         }
+    }
+
+    void deliverRaw(String sender, List<String> recipients, String raw) throws SQLException {
+        try (Connection db = connect()) {
+            db.setAutoCommit(false);
+            for (String recipient : recipients.stream().distinct().toList()) insert(db, recipient, raw);
+            insertSent(db, sender, String.join(", ", recipients), raw, "LOCAL_DELIVERED");
+            db.commit();
+        }
+    }
+
+    long recordOutgoing(String sender, String recipient, String raw) throws SQLException {
+        try (Connection db = connect()) {
+            return insertSent(db, sender, recipient, raw, "PENDING");
+        }
+    }
+
+    private long insertSent(Connection db, String sender, String recipients, String raw, String status) throws SQLException {
+        try (PreparedStatement sql = db.prepareStatement(
+                "INSERT INTO mail_sent(sender, recipients, content, status) VALUES (?, ?, ?, ?) RETURNING id")) {
+            sql.setString(1, sender);
+            sql.setString(2, recipients);
+            sql.setString(3, raw);
+            sql.setString(4, status);
+            try (ResultSet rows = sql.executeQuery()) { rows.next(); return rows.getLong(1); }
+        }
+    }
+
+    void outgoingStatus(long id, String status) throws SQLException {
+        try (Connection db = connect(); PreparedStatement sql = db.prepareStatement(
+                "UPDATE mail_sent SET status = ? WHERE id = ?")) {
+            sql.setString(1, status);
+            sql.setLong(2, id);
+            sql.executeUpdate();
+        }
+    }
+
+    List<Message> sent(String email) throws SQLException {
+        List<Message> messages = new ArrayList<>();
+        try (Connection db = connect(); PreparedStatement sql = db.prepareStatement(
+                "SELECT id, content, status FROM mail_sent WHERE sender = ? ORDER BY id")) {
+            sql.setString(1, email);
+            try (ResultSet rows = sql.executeQuery()) {
+                while (rows.next()) messages.add(new Message(rows.getLong(1),
+                        "X-Lab-Status: " + rows.getString(3) + "\r\n" + rows.getString(2)));
+            }
+        }
+        return messages;
+    }
+
+    record SentRow(String sender, String recipient, String status, String date, String content) {}
+
+    List<SentRow> recentSent() throws SQLException {
+        List<SentRow> result = new ArrayList<>();
+        try (Connection db = connect(); Statement sql = db.createStatement(); ResultSet rows = sql.executeQuery(
+                "SELECT sender, recipients, status, created_at, content FROM mail_sent ORDER BY id DESC LIMIT 100")) {
+            while (rows.next()) result.add(new SentRow(rows.getString(1), rows.getString(2), rows.getString(3),
+                    rows.getString(4), "X-Lab-Status: " + rows.getString(3) + "\r\n" + rows.getString(5)));
+        }
+        return result;
     }
 
     private void insert(Connection db, String recipient, String content) throws SQLException {

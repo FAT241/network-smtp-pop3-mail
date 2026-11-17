@@ -43,6 +43,7 @@ public class SMTPClient extends JFrame {
     private JTextField txtTo, txtSubject;
     private JTextArea txtMessage, txtProtocolLog;
     private JButton btnSendMail;
+    private File attachedFile;
 
     public SMTPClient() {
         setTitle("SMTP Client - Hệ thống Gửi Thư (Hỗ trợ Đăng ký / Đăng nhập qua LAN)");
@@ -213,7 +214,30 @@ public class SMTPClient extends JFrame {
         btnSendMail.setFont(new Font("SansSerif", Font.BOLD, 14));
         btnSendMail.setBackground(new Color(22, 163, 74));
         btnSendMail.setForeground(Color.WHITE);
-        panel.add(btnSendMail, BorderLayout.SOUTH);
+        JPanel bottom = new JPanel(new BorderLayout(8, 8));
+        JPanel files = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JButton attach = new JButton("Đính kèm file...");
+        JButton remove = new JButton("Bỏ file");
+        JLabel selectedFile = new JLabel("Chưa chọn file (tối đa 14 MiB)");
+        files.add(attach);
+        files.add(remove);
+        files.add(selectedFile);
+        attach.addActionListener(e -> {
+            JFileChooser chooser = new JFileChooser();
+            if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+                File candidate = chooser.getSelectedFile();
+                if (!candidate.isFile() || candidate.length() > 14 * 1024 * 1024) {
+                    JOptionPane.showMessageDialog(this, "Chọn một file tối đa 14 MiB.");
+                    return;
+                }
+                attachedFile = candidate;
+                selectedFile.setText(candidate.getName());
+            }
+        });
+        remove.addActionListener(e -> { attachedFile = null; selectedFile.setText("Chưa chọn file"); });
+        bottom.add(files, BorderLayout.NORTH);
+        bottom.add(btnSendMail, BorderLayout.SOUTH);
+        panel.add(bottom, BorderLayout.SOUTH);
 
         btnLogout.addActionListener(e -> {
             loggedInPassword = null;
@@ -356,6 +380,7 @@ public class SMTPClient extends JFrame {
         String to = txtTo.getText().trim();
         String subject = txtSubject.getText().trim();
         String body = txtMessage.getText();
+        File file = attachedFile;
 
         if (!to.matches("[^\\s@<>]+@[^\\s@<>]+") || subject.contains("\r") || subject.contains("\n")) {
             JOptionPane.showMessageDialog(this, "Địa chỉ người nhận hoặc tiêu đề không hợp lệ.");
@@ -391,31 +416,18 @@ public class SMTPClient extends JFrame {
 
                 sendAndLog(out, in, "MAIL FROM:<" + email + ">", "250");
                 sendAndLog(out, in, "RCPT TO:<" + to + ">", "250");
+                String mime = MailMime.compose(email, to, subject, body, file);
                 sendAndLog(out, in, "DATA", "354");
-
-                out.print("From: " + email + "\r\n");
-                out.print("To: " + to + "\r\n");
-                String normalizedBody = body.replace("\r\n", "\n").replace('\r', '\n').replace("\n", "\r\n");
-                if (isGmail(host)) {
-                    out.print("Date: " + java.time.ZonedDateTime.now()
-                            .format(java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME) + "\r\n");
-                    out.print("Message-ID: <" + java.util.UUID.randomUUID() + "@" + GMAIL_HOST + ">\r\n");
-                    out.print("Subject: " + encodeSubject(subject) + "\r\n");
-                    out.print("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n");
-                    out.print("Content-Transfer-Encoding: base64\r\n\r\n");
-                    out.print(Base64.getMimeEncoder().encodeToString(normalizedBody.getBytes(StandardCharsets.UTF_8)));
-                    out.print("\r\n");
-                } else {
-                    out.print("Subject: " + subject + "\r\n\r\n");
-                    out.print(normalizedBody.replaceAll("(?m)^\\.", "..") + "\r\n");
-                }
+                out.print(mime.replaceAll("(?m)^\\.", ".."));
+                if (!mime.endsWith("\r\n")) out.print("\r\n");
                 out.print(".\r\n");
                 out.flush();
                 log("CLIENT: [Đã gửi Header + Body + dấu chấm '.' kết thúc DATA]");
                 readAndLog(in, "250");
 
-                sendAndLog(out, in, "QUIT", "221");
-                log("\n===> GỬI THƯ THÀNH CÔNG TỚI [" + to + "]!");
+                // Acceptance is already confirmed; a failed QUIT must not be reported as send failure.
+                try { sendAndLog(out, in, "QUIT", "221"); } catch (IOException ignored) { }
+                log("\n===> SERVER ĐÃ CHẤP NHẬN THƯ TỚI [" + to + "]!");
 
             } catch (Exception ex) {
                 log("\n[LỖI KHI GỬI THƯ]: " + ex.getMessage());
@@ -551,8 +563,11 @@ public class SMTPClient extends JFrame {
                    - Muốn tạo tài khoản mới: Nhập email bất kỳ (VD: phat@vku.udn.vn) + mật khẩu -> Bấm 'Đăng ký tài khoản mới'.
                 
                 3. GỬI VÀ NHẬN THƯ:
-                   - Lưu ý: Tài khoản người nhận (RCPT TO) phải là tài khoản đã được đăng ký trên Server.
-                   - Sau khi gửi thư xong ở SMTPClient, mở POP3Client đăng nhập đúng tài khoản người nhận để tải thư về đọc.
+                   - Lưu ý: Người nhận nội bộ phải đăng ký. Người nhận bên ngoài cần cấu hình Gmail trên Server.
+                   - Chọn Đính kèm file để gửi file tối đa 14 MiB.
+                   - POP3Client: Hộp thư đến hoặc Thư đã gửi, xem và lưu file.
+                   - Gửi ra Gmail: đăng nhập tài khoản NỘI BỘ trên localhost/IP server.
+                   - Nút Dùng Gmail gửi trực tiếp, không lưu vào server nội bộ.
                 """;
         JOptionPane.showMessageDialog(this, guide, "Hướng dẫn sử dụng SMTP & POP3", JOptionPane.INFORMATION_MESSAGE);
     }
@@ -565,7 +580,7 @@ public class SMTPClient extends JFrame {
         Socket socket = isGmail(host) ? SSLSocketFactory.getDefault().createSocket() : new Socket();
         try {
             socket.connect(new InetSocketAddress(host, port), 5_000);
-            socket.setSoTimeout(15_000);
+            socket.setSoTimeout(120_000);
             if (socket instanceof SSLSocket tls) {
                 var params = tls.getSSLParameters();
                 params.setEndpointIdentificationAlgorithm("HTTPS");

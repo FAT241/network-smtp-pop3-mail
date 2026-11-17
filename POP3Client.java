@@ -36,7 +36,10 @@ public class POP3Client extends JFrame {
     private JLabel lblCurrentUser;
     private JTextArea txtMailOutput;
     private JTextField txtDeleteIndex;
-    private JButton btnRefreshMail, btnDeleteMail;
+    private JButton btnRefreshMail, btnDeleteMail, btnLogout;
+    private final JComboBox<String> folder = new JComboBox<>(new String[]{"Hộp thư đến", "Thư đã gửi"});
+    private final JComboBox<String> messagePicker = new JComboBox<>();
+    private final List<String> loadedMessages = new ArrayList<>();
 
     public POP3Client() {
         setTitle("POP3 Client - Hệ thống Nhận Thư (Đăng nhập USER/PASS qua LAN)");
@@ -132,9 +135,12 @@ public class POP3Client extends JFrame {
         lblCurrentUser.setFont(new Font("SansSerif", Font.BOLD, 13));
         lblCurrentUser.setForeground(new Color(21, 128, 61));
 
-        JButton btnLogout = new JButton("Đăng xuất / Đổi tài khoản");
+        btnLogout = new JButton("Đăng xuất / Đổi tài khoản");
         userBar.add(lblCurrentUser, BorderLayout.WEST);
-        userBar.add(btnLogout, BorderLayout.EAST);
+        JPanel controls = new JPanel();
+        controls.add(folder);
+        controls.add(btnLogout);
+        userBar.add(controls, BorderLayout.EAST);
         panel.add(userBar, BorderLayout.NORTH);
 
         txtMailOutput = new JTextArea();
@@ -157,9 +163,27 @@ public class POP3Client extends JFrame {
         bottomPanel.add(txtDeleteIndex);
         bottomPanel.add(btnDeleteMail);
 
-        panel.add(bottomPanel, BorderLayout.SOUTH);
+        JPanel actions = new JPanel(new BorderLayout());
+        JPanel viewer = new JPanel();
+        JButton view = new JButton("Xem thư / Lưu file");
+        viewer.add(messagePicker);
+        viewer.add(view);
+        actions.add(viewer, BorderLayout.NORTH);
+        actions.add(bottomPanel, BorderLayout.SOUTH);
+        panel.add(actions, BorderLayout.SOUTH);
+        view.addActionListener(e -> {
+            int index = messagePicker.getSelectedIndex();
+            if (index >= 0 && index < loadedMessages.size()) MailMime.show(this, loadedMessages.get(index));
+        });
+        folder.addActionListener(e -> fetchAllEmails());
 
-        btnLogout.addActionListener(e -> cardLayout.show(mainContainer, "LOGIN"));
+        btnLogout.addActionListener(e -> {
+            loggedInPassword = null;
+            loadedMessages.clear();
+            messagePicker.removeAllItems();
+            txtMailOutput.setText("");
+            cardLayout.show(mainContainer, "LOGIN");
+        });
         btnRefreshMail.addActionListener(e -> fetchAllEmails());
         btnDeleteMail.addActionListener(e -> deleteSelectedEmail());
 
@@ -174,7 +198,7 @@ public class POP3Client extends JFrame {
 
         lblAuthStatus.setText("Đang kiểm tra USER / PASS với POP3 Server...");
         new Thread(() -> {
-            try (Socket socket = new Socket(host, port);
+            try (Socket socket = connectPop3(host, port);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
@@ -217,9 +241,15 @@ public class POP3Client extends JFrame {
     private void fetchAllEmails() {
         txtMailOutput.setText("");
         btnRefreshMail.setEnabled(false);
+        btnLogout.setEnabled(false);
+        btnDeleteMail.setEnabled(false);
+        folder.setEnabled(false);
+        boolean sent = folder.getSelectedIndex() == 1;
+        loadedMessages.clear();
+        messagePicker.removeAllItems();
 
         new Thread(() -> {
-            try (Socket socket = new Socket(loggedInServer, loggedInPort);
+            try (Socket socket = connectPop3(loggedInServer, loggedInPort);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
@@ -227,6 +257,7 @@ public class POP3Client extends JFrame {
                 sendCmd(out, in, "USER " + loggedInEmail);
                 sendCmd(out, in, "PASS " + loggedInPassword);
 
+                if (sent) sendCmd(out, in, "XBOX SENT");
                 String statRes = sendCmd(out, in, "STAT");
                 String[] parts = statRes.split(" ");
                 int mailCount = (parts.length >= 2) ? Integer.parseInt(parts[1]) : 0;
@@ -242,7 +273,13 @@ public class POP3Client extends JFrame {
                     log("CLIENT: RETR " + i);
                     out.print("RETR " + i + "\r\n");
                     out.flush();
-                    readMultiLine(in);
+                    String raw = readMail(in);
+                    String label = "Thư #" + i;
+                    log(MailMime.preview(raw).text());
+                    SwingUtilities.invokeLater(() -> {
+                        loadedMessages.add(raw);
+                        messagePicker.addItem(label);
+                    });
                 }
 
                 sendCmd(out, in, "QUIT");
@@ -250,15 +287,29 @@ public class POP3Client extends JFrame {
             } catch (Exception ex) {
                 log("\n[LỖI POP3]: " + ex.getMessage());
             } finally {
-                SwingUtilities.invokeLater(() -> btnRefreshMail.setEnabled(true));
+                SwingUtilities.invokeLater(() -> {
+                    btnRefreshMail.setEnabled(true);
+                    btnLogout.setEnabled(true);
+                    btnDeleteMail.setEnabled(!sent);
+                    folder.setEnabled(true);
+                });
             }
         }).start();
     }
 
     private void deleteSelectedEmail() {
+        if (folder.getSelectedIndex() == 1) return;
         String idxStr = txtDeleteIndex.getText().trim();
+        if (!idxStr.matches("[1-9][0-9]*")) {
+            JOptionPane.showMessageDialog(this, "Nhập số thứ tự thư hợp lệ.");
+            return;
+        }
+        btnLogout.setEnabled(false);
+        btnRefreshMail.setEnabled(false);
+        btnDeleteMail.setEnabled(false);
+        folder.setEnabled(false);
         new Thread(() -> {
-            try (Socket socket = new Socket(loggedInServer, loggedInPort);
+            try (Socket socket = connectPop3(loggedInServer, loggedInPort);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
@@ -273,7 +324,13 @@ public class POP3Client extends JFrame {
                     fetchAllEmails();
                 });
             } catch (Exception ex) {
-                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Lỗi khi xóa thư: " + ex.getMessage()));
+                SwingUtilities.invokeLater(() -> {
+                    btnLogout.setEnabled(true);
+                    btnRefreshMail.setEnabled(true);
+                    btnDeleteMail.setEnabled(true);
+                    folder.setEnabled(true);
+                    JOptionPane.showMessageDialog(this, "Lỗi khi xóa thư: " + ex.getMessage());
+                });
             }
         }).start();
     }
@@ -430,6 +487,30 @@ public class POP3Client extends JFrame {
             }
             log("  " + (line.startsWith("..") ? line.substring(1) : line));
         }
+    }
+
+    private static Socket connectPop3(String host, int port) throws IOException {
+        Socket socket = new Socket();
+        try {
+            socket.connect(new InetSocketAddress(host, port), 10000);
+            socket.setSoTimeout(30000);
+            return socket;
+        } catch (IOException | RuntimeException ex) {
+            socket.close();
+            throw ex;
+        }
+    }
+
+    private String readMail(BufferedReader in) throws IOException {
+        readSingleLine(in);
+        StringBuilder raw = new StringBuilder();
+        String line;
+        while ((line = in.readLine()) != null) {
+            if (line.equals(".")) return raw.toString();
+            raw.append(line.startsWith("..") ? line.substring(1) : line).append("\r\n");
+            if (raw.length() > MailMime.MAX_BYTES) throw new IOException("Thư vượt quá giới hạn.");
+        }
+        throw new EOFException("Mất kết nối khi tải thư.");
     }
 
     private void log(String msg) {

@@ -11,13 +11,23 @@ public class LANMailServer extends JFrame {
     public static final int SMTP_PORT = Integer.getInteger("lab3.smtp.port", 2525);
     public static final int POP3_PORT = Integer.getInteger("lab3.pop3.port", 1110);
     private final MailStore store;
+    interface OutboundRelay {
+        String prepare(String raw, String sender) throws Exception;
+        void send(String raw, String recipient) throws Exception;
+    }
+    private volatile OutboundRelay gmailRelay;
 
     private JTextArea txtServerLog;
     private JLabel lblLanIp;
     private String serverLanIp;
 
     public LANMailServer(MailStore store) {
+        this(store, null);
+    }
+
+    LANMailServer(MailStore store, OutboundRelay relayService) {
         this.store = store;
+        this.gmailRelay = relayService;
         setTitle("LAN Mail Server - SMTP (" + SMTP_PORT + ") & POP3 (" + POP3_PORT + ")");
         setSize(900, 600);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -52,6 +62,14 @@ public class LANMailServer extends JFrame {
         JScrollPane scrollLog = new JScrollPane(txtServerLog);
         scrollLog.setBorder(BorderFactory.createTitledBorder("Nhật ký kết nối trực tiếp từ các máy Client trong mạng LAN"));
         add(scrollLog, BorderLayout.CENTER);
+        JPanel actions = new JPanel();
+        JButton relay = new JButton("Cấu hình Gmail chuyển thư...");
+        JButton sent = new JButton("Thư đã gửi / File đính kèm");
+        actions.add(relay);
+        actions.add(sent);
+        add(actions, BorderLayout.SOUTH);
+        relay.addActionListener(e -> configureRelay(relay));
+        sent.addActionListener(e -> showSent(sent));
 
         // Khởi động 2 luồng Server lắng nghe trên 0.0.0.0
         new Thread(this::startSmtpServer).start();
@@ -103,12 +121,13 @@ public class LANMailServer extends JFrame {
     }
 
     private void handleSmtpClient(Socket client, String clientIp) {
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+        try (client; BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
              PrintWriter out = new PrintWriter(new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
             out.print("220 " + serverLanIp + " LAN ESMTP Server Ready\r\n");
             out.flush();
 
+            client.setSoTimeout(120_000);
             String authenticatedUser = null;
             String sender = null;
             List<String> recipients = new ArrayList<>();
@@ -163,8 +182,12 @@ public class LANMailServer extends JFrame {
                     String rcpt = line.substring(8).replace("<", "").replace(">", "").trim().toLowerCase();
                     if (sender == null) {
                         out.print("503 Send MAIL FROM first\r\n");
-                    } else if (!store.exists(rcpt)) {
-                        out.print("550 5.1.1 User unknown: " + rcpt + "\r\n");
+                    } else if (!rcpt.matches("[^\\s@<>;,]+@[^\\s@<>;,]+")) {
+                        out.print("553 Invalid recipient address\r\n");
+                    } else if (!recipients.isEmpty()) {
+                        out.print("452 This lab accepts one recipient per message\r\n");
+                    } else if (!store.exists(rcpt) && gmailRelay == null) {
+                        out.print("550 External recipient: configure Gmail relay on LANMailServer first\r\n");
                     } else {
                         recipients.add(rcpt);
                         out.print("250 2.1.5 Recipient OK\r\n");
@@ -176,33 +199,55 @@ public class LANMailServer extends JFrame {
                         out.print("354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
                         out.flush();
 
-                        String subject = "(Không có tiêu đề)";
-                        StringBuilder bodyBuilder = new StringBuilder();
-                        boolean inBody = false;
-
+                        StringBuilder raw = new StringBuilder();
+                        long bytes = 0;
                         String dataLine;
                         while ((dataLine = in.readLine()) != null) {
                             if (dataLine.equals(".")) break;
-
-                            if (!inBody) {
-                                if (dataLine.isEmpty()) {
-                                    inBody = true; // Bắt đầu vào phần Nội dung sau dòng trống
-                                } else if (dataLine.toLowerCase().startsWith("subject:")) {
-                                    subject = dataLine.substring(8).trim();
-                                }
-                            } else {
-                                if (dataLine.startsWith("..")) dataLine = dataLine.substring(1);
-                                bodyBuilder.append(dataLine).append("\r\n");
+                            if (dataLine.startsWith("..")) dataLine = dataLine.substring(1);
+                            bytes += dataLine.getBytes(StandardCharsets.UTF_8).length + 2L;
+                            if (bytes > MailMime.MAX_BYTES) {
+                                out.print("552 Message exceeds 20 MiB\r\n");
+                                out.flush();
+                                return;
                             }
+                            raw.append(dataLine).append("\r\n");
                         }
-
                         if (dataLine == null) return;
                         try {
-                            store.deliver(sender, recipients, subject, bodyBuilder.toString());
-                        } catch (java.sql.SQLException e) {
-                            log("[PostgreSQL] " + e.getMessage());
-                            out.print("451 4.3.0 Storage temporarily unavailable\r\n");
+                            String content = MailMime.canonical(raw.toString(), sender, recipients);
+                            String recipient = recipients.get(0);
+                            if (store.exists(recipient)) {
+                                store.deliverRaw(sender, recipients, content);
+                            } else {
+                                OutboundRelay relay = gmailRelay;
+                                if (relay == null) throw new IOException("Chưa cấu hình Gmail chuyển thư.");
+                                content = relay.prepare(content, sender);
+                                long id = store.recordOutgoing(sender, recipient, content);
+                                try {
+                                    relay.send(content, recipient);
+                                } catch (Exception ex) {
+                                    // A dropped connection after DATA can mean Gmail accepted it. Never auto-retry.
+                                    String status = ex instanceof jakarta.mail.AuthenticationFailedException
+                                            ? "AUTH_FAILED" : "UNKNOWN_CHECK_GMAIL";
+                                    store.outgoingStatus(id, status);
+                                    throw new IOException("Gmail: " + ex.getMessage()
+                                            + ". Kiem tra Thu da gui/Gmail truoc khi gui lai.", ex);
+                                }
+                                try {
+                                    store.outgoingStatus(id, "RELAY_ACCEPTED");
+                                } catch (java.sql.SQLException ex) {
+                                    log("[CẢNH BÁO] Gmail đã nhận thư #" + id
+                                            + ", DB chưa cập nhật trạng thái. Không gửi lại: " + ex.getMessage());
+                                }
+                                log("[Gmail] Đã nhận để chuyển tiếp tới " + recipient);
+                            }
+                        } catch (Exception e) {
+                            log("[Gửi thư] " + e.getMessage());
+                            out.print("451 " + String.valueOf(e.getMessage()).replaceAll("[\\r\\n]+", " ") + "\r\n");
                             out.flush();
+                            sender = null;
+                            recipients.clear();
                             continue;
                         }
                         sender = null;
@@ -240,7 +285,7 @@ public class LANMailServer extends JFrame {
     }
 
     private void handlePop3Client(Socket client, String clientIp) {
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+        try (client; BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
              PrintWriter out = new PrintWriter(new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
             out.print("+OK LAN POP3 Server Ready\r\n");
@@ -248,6 +293,7 @@ public class LANMailServer extends JFrame {
 
             String currentUser = null;
             boolean authenticated = false;
+            boolean sentFolder = false;
             List<MailStore.Message> messages = new ArrayList<>();
             Set<Integer> deleted = new HashSet<>();
 
@@ -287,6 +333,14 @@ public class LANMailServer extends JFrame {
                     break;
                 } else if (!authenticated) {
                     out.print("-ERR Please login with USER and PASS first\r\n");
+                } else if (upper.equals("XBOX SENT") || upper.equals("XBOX INBOX")) {
+                    if (!deleted.isEmpty()) {
+                        out.print("-ERR Finish deletions with QUIT before changing folder\r\n");
+                    } else {
+                        sentFolder = upper.equals("XBOX SENT");
+                        messages = sentFolder ? store.sent(currentUser) : store.inbox(currentUser);
+                        out.print("+OK Folder selected\r\n");
+                    }
                 } else if (upper.equals("STAT")) {
                     long totalBytes = 0;
                     for (int i = 0; i < messages.size(); i++) {
@@ -311,6 +365,8 @@ public class LANMailServer extends JFrame {
                     } else {
                         out.print("-ERR No such message\r\n");
                     }
+                } else if (upper.startsWith("DELE ") && sentFolder) {
+                    out.print("-ERR Sent folder is read-only\r\n");
                 } else if (upper.startsWith("DELE ")) {
                     int idx = Integer.parseInt(line.substring(5).trim()) - 1;
                     if (idx >= 0 && idx < messages.size() && !deleted.contains(idx)) {
@@ -328,6 +384,76 @@ public class LANMailServer extends JFrame {
         } catch (Exception e) {
             log("[POP3 Ngắt kết nối]: " + e.getMessage());
         }
+    }
+
+    private void configureRelay(JButton button) {
+        JTextField email = new JTextField(30);
+        JPasswordField password = new JPasswordField();
+        JPanel form = new JPanel(new GridLayout(0, 1, 5, 5));
+        form.add(new JLabel("Gmail trung gian (thư thật sẽ được gửi bằng địa chỉ này)"));
+        form.add(email);
+        form.add(new JLabel("Mật khẩu ứng dụng Google — chỉ giữ trong phiên chạy server"));
+        form.add(password);
+        form.add(new JLabel("Tài khoản nội bộ được ghi trong tên người gửi. Reply trả về Gmail trung gian."));
+        if (JOptionPane.showConfirmDialog(this, form, "Gmail chuyển thư — TLS 465",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) return;
+        String address = email.getText().trim();
+        String secret = new String(password.getPassword());
+        password.setText("");
+        button.setEnabled(false);
+        button.setText("Đang kiểm tra Gmail...");
+        new Thread(() -> {
+            try {
+                GmailRelay relay = new GmailRelay(address, secret);
+                relay.verify();
+                gmailRelay = relay;
+                log("[Gmail] Đã cấu hình chuyển thư qua " + address);
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                        "Gmail đã kết nối. Client nội bộ có thể gửi tới địa chỉ mail thật."));
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                        "Không cấu hình được Gmail: " + ex.getMessage()));
+            } finally {
+                SwingUtilities.invokeLater(() -> {
+                    button.setEnabled(true);
+                    button.setText("Cấu hình Gmail chuyển thư...");
+                });
+            }
+        }, "gmail-config").start();
+    }
+
+    private void showSent(JButton button) {
+        button.setEnabled(false);
+        new Thread(() -> {
+            try {
+                List<MailStore.SentRow> rows = store.recentSent();
+                SwingUtilities.invokeLater(() -> {
+                    var model = new javax.swing.table.DefaultTableModel(
+                            new String[]{"Người gửi nội bộ", "Người nhận", "Trạng thái", "Thời gian"}, 0) {
+                        @Override public boolean isCellEditable(int r, int c) { return false; }
+                    };
+                    for (var row : rows) model.addRow(new Object[]{row.sender(), row.recipient(), row.status(), row.date()});
+                    JTable table = new JTable(model);
+                    table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+                    JButton view = new JButton("Xem thư / Lưu file đính kèm");
+                    view.addActionListener(e -> {
+                        int selected = table.getSelectedRow();
+                        if (selected >= 0) MailMime.show(this, rows.get(selected).content());
+                    });
+                    JPanel panel = new JPanel(new BorderLayout(8, 8));
+                    panel.add(new JScrollPane(table));
+                    panel.add(view, BorderLayout.SOUTH);
+                    panel.setPreferredSize(new Dimension(850, 360));
+                    JOptionPane.showMessageDialog(this, panel,
+                            "100 thư gần nhất — RELAY_ACCEPTED: Gmail nhận chuyển tiếp, chưa xác nhận vào Inbox",
+                            JOptionPane.PLAIN_MESSAGE);
+                });
+            } catch (Exception ex) {
+                log("[Thư đã gửi] " + ex.getMessage());
+            } finally {
+                SwingUtilities.invokeLater(() -> button.setEnabled(true));
+            }
+        }, "sent-history").start();
     }
 
     private void log(String msg) {
