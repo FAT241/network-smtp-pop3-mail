@@ -1,3 +1,6 @@
+import java.util.StringJoiner;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 import javax.swing.*;
 import java.awt.*;
 import java.io.*;
@@ -17,6 +20,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 public class SMTPClient extends JFrame {
+
+    private static final String GMAIL_HOST = "smtp.gmail.com";
+    private static final int GMAIL_PORT = 465;
 
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel mainContainer = new JPanel(cardLayout);
@@ -113,6 +119,24 @@ public class SMTPClient extends JFrame {
         btnScan = new JButton("Tự động quét Server LAN");
         helpPanel.add(btnScan);
         helpPanel.add(btnHelp);
+        JButton btnGmail = new JButton("Dùng Gmail");
+        helpPanel.add(btnGmail);
+        btnGmail.addActionListener(e -> {
+            boolean gmail = txtAuthServer.isEditable();
+            txtAuthServer.setText(gmail ? GMAIL_HOST : "localhost");
+            txtAuthPort.setText(gmail ? Integer.toString(GMAIL_PORT) : "2525");
+            txtAuthServer.setEditable(!gmail);
+            txtAuthPort.setEditable(!gmail);
+            btnRegister.setEnabled(!gmail);
+            btnScan.setEnabled(!gmail);
+            btnGmail.setText(gmail ? "Dùng máy chủ LAN" : "Dùng Gmail");
+            txtAuthEmail.setText(gmail ? "" : "sv1@vku.udn.vn");
+            txtAuthPassword.setText("");
+            lblAuthStatus.setText(gmail
+                    ? "Nhập địa chỉ Gmail và Mật khẩu ứng dụng rồi bấm Đăng nhập."
+                    : "Nhập địa chỉ máy chủ LAN để đăng nhập hoặc đăng ký.");
+            txtAuthEmail.requestFocusInWindow();
+        });
 
         southPanel.add(lblAuthStatus);
         southPanel.add(btnPanel);
@@ -191,7 +215,11 @@ public class SMTPClient extends JFrame {
         btnSendMail.setForeground(Color.WHITE);
         panel.add(btnSendMail, BorderLayout.SOUTH);
 
-        btnLogout.addActionListener(e -> cardLayout.show(mainContainer, "AUTH"));
+        btnLogout.addActionListener(e -> {
+            loggedInPassword = null;
+            if (isGmail(loggedInServer)) txtAuthPassword.setText("");
+            cardLayout.show(mainContainer, "AUTH");
+        });
         btnHelp.addActionListener(e -> showHelpDialog());
         btnSendMail.addActionListener(e -> sendEmailProcess());
 
@@ -201,6 +229,10 @@ public class SMTPClient extends JFrame {
     // Xử lý Đăng ký tài khoản mới lên LANMailServer
     private void performRegister() {
         String host = txtAuthServer.getText().trim();
+        if (isGmail(host)) {
+            lblAuthStatus.setText("Dùng tài khoản Google có sẵn để đăng nhập Gmail.");
+            return;
+        }
         int port = Integer.parseInt(txtAuthPort.getText().trim());
         String email = txtAuthEmail.getText().trim().toLowerCase();
         String pass = new String(txtAuthPassword.getPassword());
@@ -247,13 +279,27 @@ public class SMTPClient extends JFrame {
     // Xử lý kiểm tra Đăng nhập bằng lệnh AUTH LOGIN (RFC 4954)
     private void performLogin() {
         String host = txtAuthServer.getText().trim();
-        int port = Integer.parseInt(txtAuthPort.getText().trim());
+        int port;
+        try {
+            port = Integer.parseInt(txtAuthPort.getText().trim());
+            if (port < 1 || port > 65535 || isGmail(host) && port != GMAIL_PORT) {
+                throw new NumberFormatException();
+            }
+        } catch (NumberFormatException e) {
+            lblAuthStatus.setText(isGmail(host) ? "Gmail dùng cổng TLS 465." : "Cổng SMTP không hợp lệ.");
+            return;
+        }
         String email = txtAuthEmail.getText().trim().toLowerCase();
-        String pass = new String(txtAuthPassword.getPassword());
+        if (!email.matches("[^\\s@<>]+@[^\\s@<>]+")) {
+            lblAuthStatus.setText("Địa chỉ email không hợp lệ.");
+            return;
+        }
+        String inputPassword = new String(txtAuthPassword.getPassword());
+        String pass = isGmail(host) ? inputPassword.replace(" ", "") : inputPassword;
 
         lblAuthStatus.setText("Đang xác thực tài khoản với SMTP Server...");
         new Thread(() -> {
-            try (Socket socket = new Socket(host, port);
+            try (Socket socket = connectSmtp(host, port);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
@@ -272,7 +318,7 @@ public class SMTPClient extends JFrame {
 
                 out.print(Base64.getEncoder().encodeToString(pass.getBytes(StandardCharsets.UTF_8)) + "\r\n");
                 out.flush();
-                String authRes = in.readLine();
+                String authRes = readSmtpReply(in);
 
                 out.print("QUIT\r\n");
                 out.flush();
@@ -289,7 +335,10 @@ public class SMTPClient extends JFrame {
                         cardLayout.show(mainContainer, "MAIL");
                     } else {
                         lblAuthStatus.setText("Sai tài khoản hoặc mật khẩu!");
-                        JOptionPane.showMessageDialog(this, "Đăng nhập thất bại: Sai tài khoản hoặc mật khẩu!\n(Nếu chưa có tài khoản, hãy bấm 'Đăng ký tài khoản mới')", "Lỗi xác thực", JOptionPane.ERROR_MESSAGE);
+                        JOptionPane.showMessageDialog(this, isGmail(host)
+                                ? "Gmail từ chối xác thực. Kiểm tra địa chỉ và Mật khẩu ứng dụng.\n" + authRes
+                                : "Đăng nhập thất bại: Sai tài khoản hoặc mật khẩu!",
+                                "Lỗi xác thực", JOptionPane.ERROR_MESSAGE);
                     }
                 });
 
@@ -308,11 +357,19 @@ public class SMTPClient extends JFrame {
         String subject = txtSubject.getText().trim();
         String body = txtMessage.getText();
 
+        if (!to.matches("[^\\s@<>]+@[^\\s@<>]+") || subject.contains("\r") || subject.contains("\n")) {
+            JOptionPane.showMessageDialog(this, "Địa chỉ người nhận hoặc tiêu đề không hợp lệ.");
+            return;
+        }
+        String host = loggedInServer;
+        int port = loggedInPort;
+        String email = loggedInEmail;
+        String pass = loggedInPassword;
         txtProtocolLog.setText("");
         btnSendMail.setEnabled(false);
 
         new Thread(() -> {
-            try (Socket socket = new Socket(loggedInServer, loggedInPort);
+            try (Socket socket = connectSmtp(host, port);
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                  PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
@@ -320,27 +377,38 @@ public class SMTPClient extends JFrame {
                 sendAndLog(out, in, "EHLO vku.udn.vn", "250");
                 sendAndLog(out, in, "AUTH LOGIN", "334");
 
-                String b64User = Base64.getEncoder().encodeToString(loggedInEmail.getBytes(StandardCharsets.UTF_8));
-                log("CLIENT: " + b64User + " (Base64 User)");
+                String b64User = Base64.getEncoder().encodeToString(email.getBytes(StandardCharsets.UTF_8));
+                log("CLIENT: [tài khoản]");
                 out.print(b64User + "\r\n");
                 out.flush();
                 readAndLog(in, "334");
 
-                String b64Pass = Base64.getEncoder().encodeToString(loggedInPassword.getBytes(StandardCharsets.UTF_8));
-                log("CLIENT: " + b64Pass + " (Base64 Pass)");
+                String b64Pass = Base64.getEncoder().encodeToString(pass.getBytes(StandardCharsets.UTF_8));
+                log("CLIENT: [mật khẩu ẩn]");
                 out.print(b64Pass + "\r\n");
                 out.flush();
                 readAndLog(in, "235");
 
-                sendAndLog(out, in, "MAIL FROM:<" + loggedInEmail + ">", "250");
+                sendAndLog(out, in, "MAIL FROM:<" + email + ">", "250");
                 sendAndLog(out, in, "RCPT TO:<" + to + ">", "250");
                 sendAndLog(out, in, "DATA", "354");
 
-                out.print("From: " + loggedInEmail + "\r\n");
+                out.print("From: " + email + "\r\n");
                 out.print("To: " + to + "\r\n");
-                out.print("Subject: " + subject + "\r\n");
-                out.print("\r\n");
-                out.print(body + "\r\n");
+                String normalizedBody = body.replace("\r\n", "\n").replace('\r', '\n').replace("\n", "\r\n");
+                if (isGmail(host)) {
+                    out.print("Date: " + java.time.ZonedDateTime.now()
+                            .format(java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME) + "\r\n");
+                    out.print("Message-ID: <" + java.util.UUID.randomUUID() + "@" + GMAIL_HOST + ">\r\n");
+                    out.print("Subject: " + encodeSubject(subject) + "\r\n");
+                    out.print("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n");
+                    out.print("Content-Transfer-Encoding: base64\r\n\r\n");
+                    out.print(Base64.getMimeEncoder().encodeToString(normalizedBody.getBytes(StandardCharsets.UTF_8)));
+                    out.print("\r\n");
+                } else {
+                    out.print("Subject: " + subject + "\r\n\r\n");
+                    out.print(normalizedBody.replaceAll("(?m)^\\.", "..") + "\r\n");
+                }
                 out.print(".\r\n");
                 out.flush();
                 log("CLIENT: [Đã gửi Header + Body + dấu chấm '.' kết thúc DATA]");
@@ -391,7 +459,7 @@ public class SMTPClient extends JFrame {
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() -> {
                     lblAuthStatus.setText("Lỗi quét mạng LAN: " + e.getMessage());
-                    btnScan.setEnabled(true);
+                    btnScan.setEnabled(txtAuthServer.isEditable());
                 });
                 return;
             } finally {
@@ -402,7 +470,7 @@ public class SMTPClient extends JFrame {
             List<String> result = new ArrayList<>(found);
             Collections.sort(result);
             SwingUtilities.invokeLater(() -> {
-                btnScan.setEnabled(true);
+                btnScan.setEnabled(txtAuthServer.isEditable());
                 if (result.isEmpty()) {
                     lblAuthStatus.setText("Không tìm thấy Server nào ở cổng " + port + " trong mạng LAN.");
                     JOptionPane.showMessageDialog(this,
@@ -422,6 +490,7 @@ public class SMTPClient extends JFrame {
                     }
                     chosen = sel.toString();
                 }
+                if (!txtAuthServer.isEditable()) return;
                 txtAuthServer.setText(chosen);
                 lblAuthStatus.setText("Đã tìm thấy Server tại: " + chosen);
                 JOptionPane.showMessageDialog(this, "Đã tự động tìm thấy Mail Server tại IP: " + chosen);
@@ -487,21 +556,75 @@ public class SMTPClient extends JFrame {
                 """;
         JOptionPane.showMessageDialog(this, guide, "Hướng dẫn sử dụng SMTP & POP3", JOptionPane.INFORMATION_MESSAGE);
     }
-
-    private void readExpected(BufferedReader in, String code) throws IOException {
-        String res = in.readLine();
-        if (res == null || !res.startsWith(code)) throw new IOException(res);
+//
+    private static boolean isGmail(String host) {
+        return GMAIL_HOST.equalsIgnoreCase(host);
     }
 
+    static Socket connectSmtp(String host, int port) throws IOException {
+        Socket socket = isGmail(host) ? SSLSocketFactory.getDefault().createSocket() : new Socket();
+        try {
+            socket.connect(new InetSocketAddress(host, port), 5_000);
+            socket.setSoTimeout(15_000);
+            if (socket instanceof SSLSocket tls) {
+                var params = tls.getSSLParameters();
+                params.setEndpointIdentificationAlgorithm("HTTPS");
+                tls.setSSLParameters(params);
+                tls.startHandshake();
+            }
+            return socket;
+        } catch (IOException e) {
+            socket.close();
+            throw e;
+        }
+    }
+
+    private static String encodeSubject(String subject) {
+        StringJoiner words = new StringJoiner("\r\n ");
+        ByteArrayOutputStream chunk = new ByteArrayOutputStream();
+        subject.codePoints().forEach(codePoint -> {
+            byte[] bytes = Character.toString(codePoint).getBytes(StandardCharsets.UTF_8);
+            if (chunk.size() + bytes.length > 42) {
+                words.add("=?UTF-8?B?" + Base64.getEncoder().encodeToString(chunk.toByteArray()) + "?=");
+                chunk.reset();
+            }
+            chunk.writeBytes(bytes);
+        });
+        if (chunk.size() > 0) {
+            words.add("=?UTF-8?B?" + Base64.getEncoder().encodeToString(chunk.toByteArray()) + "?=");
+        }
+        return words.toString();
+    }
+
+    static String readSmtpReply(BufferedReader in) throws IOException {
+        String line = in.readLine();
+        if (line == null || line.length() < 3) throw new IOException("Phản hồi SMTP không hợp lệ.");
+        String code = line.substring(0, 3);
+        StringBuilder reply = new StringBuilder(line);
+        while (line.startsWith(code + "-")) {
+            line = in.readLine();
+            if (line == null || !(line.equals(code) || line.startsWith(code + " ") || line.startsWith(code + "-"))) {
+                throw new IOException("Phản hồi SMTP nhiều dòng bị ngắt hoặc không hợp lệ.");
+            }
+            reply.append('\n').append(line);
+        }
+        return reply.toString();
+    }
+
+    private void readExpected(BufferedReader in, String code) throws IOException {
+        String res = readSmtpReply(in);
+        if (res == null || !res.startsWith(code)) throw new IOException(res);
+    }
+//
     private void sendAndLog(PrintWriter out, BufferedReader in, String cmd, String code) throws IOException {
         log("CLIENT: " + cmd);
         out.print(cmd + "\r\n");
         out.flush();
         readAndLog(in, code);
     }
-
+//
     private void readAndLog(BufferedReader in, String code) throws IOException {
-        String res = in.readLine();
+        String res = readSmtpReply(in);
         log("SERVER: " + res);
         if (res == null || !res.startsWith(code)) {
             throw new IOException("Server từ chối (Cần mã " + code + "): " + res);
@@ -513,6 +636,10 @@ public class SMTPClient extends JFrame {
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> new SMTPClient().setVisible(true));
+        SwingUtilities.invokeLater(() -> {
+            SMTPClient client = new SMTPClient();
+            if (args.length > 0) client.txtAuthServer.setText(args[0]);
+            client.setVisible(true);
+        });
     }
 }

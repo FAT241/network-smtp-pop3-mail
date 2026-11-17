@@ -3,31 +3,27 @@ import java.awt.*;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.List;
 
 public class LANMailServer extends JFrame {
 
-    public static final int SMTP_PORT = 2525;
-    public static final int POP3_PORT = 1110;
-    public static final File DATA_DIR = new File("mail_data");
-    public static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
+    public static final int SMTP_PORT = Integer.getInteger("lab3.smtp.port", 2525);
+    public static final int POP3_PORT = Integer.getInteger("lab3.pop3.port", 1110);
+    private final MailStore store;
 
     private JTextArea txtServerLog;
     private JLabel lblLanIp;
     private String serverLanIp;
 
-    public LANMailServer() {
-        setTitle("LAN Mail Server - SMTP (Port 2525) & POP3 (Port 1110)");
+    public LANMailServer(MailStore store) {
+        this.store = store;
+        setTitle("LAN Mail Server - SMTP (" + SMTP_PORT + ") & POP3 (" + POP3_PORT + ")");
         setSize(900, 600);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout(8, 8));
 
-        initStorage();
         serverLanIp = getRealLanIPv4();
 
         // Panel hiển thị IP LAN ở trên cùng
@@ -40,7 +36,7 @@ public class LANMailServer extends JFrame {
         lblLanIp.setForeground(new Color(0, 102, 204));
 
         JLabel lblGuide = new JLabel(
-                "-> Các máy client trong mạng LAN nhập Host là [" + serverLanIp + "] (SMTP: 2525 | POP3: 1110)",
+                "-> Các máy client trong mạng LAN nhập Host là [" + serverLanIp + "] (SMTP: " + SMTP_PORT + " | POP3: " + POP3_PORT + ")",
                 SwingConstants.CENTER
         );
         lblGuide.setFont(new Font("SansSerif", Font.PLAIN, 13));
@@ -64,84 +60,31 @@ public class LANMailServer extends JFrame {
 
     public static String getRealLanIPv4() {
         try {
+            String lanAddress = null;
             Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
                 NetworkInterface iface = interfaces.nextElement();
                 if (iface.isLoopback() || !iface.isUp() || iface.isVirtual()) continue;
                 String name = iface.getDisplayName().toLowerCase();
-                if (name.contains("vmware") || name.contains("virtual") || name.contains("wsl") || name.contains("docker")) continue;
+                if (name.contains("vmware") || name.contains("virtual") || name.contains("wsl")
+                        || name.contains("docker") || name.contains("vpn") || name.contains("radmin")
+                        || name.contains("wi-fi direct")) continue;
 
                 Enumeration<InetAddress> addresses = iface.getInetAddresses();
                 while (addresses.hasMoreElements()) {
                     InetAddress addr = addresses.nextElement();
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
-                        return addr.getHostAddress();
+                        if (name.contains("wi-fi") || name.contains("wireless") || name.contains("wlan")) {
+                            return addr.getHostAddress();
+                        }
+                        if (lanAddress == null) lanAddress = addr.getHostAddress();
                     }
                 }
             }
-            return InetAddress.getLocalHost().getHostAddress();
+            return lanAddress == null ? InetAddress.getLocalHost().getHostAddress() : lanAddress;
         } catch (Exception e) {
             return "127.0.0.1";
         }
-    }
-
-    // Khởi tạo thư mục gốc và 2 tài khoản mẫu
-    public static void initStorage() {
-        try {
-            if (!DATA_DIR.exists()) DATA_DIR.mkdirs();
-            registerUser("sv1@vku.udn.vn", "123456");
-            registerUser("sv2@vku.udn.vn", "123456");
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    // Tạo thư mục riêng cho từng tài khoản và lưu file account_info.txt bên trong
-    public static synchronized boolean registerUser(String email, String password) throws IOException {
-        email = email.toLowerCase().trim();
-        File userMailbox = new File(DATA_DIR, email);
-        File accountInfoFile = new File(userMailbox, "account_info.txt");
-
-        // Nếu đã có file account_info.txt thì tài khoản đã tồn tại
-        if (accountInfoFile.exists()) return false;
-
-        if (!userMailbox.exists()) userMailbox.mkdirs();
-
-        String createdTime = LocalDateTime.now().format(TIME_FMT);
-        String infoContent = "Tên tài khoản: " + email + "\r\n"
-                           + "Thời gian tạo: " + createdTime + "\r\n"
-                           + "Mật khẩu: " + password + "\r\n";
-
-        Files.write(accountInfoFile.toPath(), infoContent.getBytes(StandardCharsets.UTF_8));
-        return true;
-    }
-
-    // Đọc danh sách tài khoản từ file account_info.txt trong từng thư mục con
-    public static synchronized Map<String, String> loadAccounts() throws IOException {
-        Map<String, String> map = new HashMap<>();
-        if (!DATA_DIR.exists()) return map;
-
-        File[] userFolders = DATA_DIR.listFiles(File::isDirectory);
-        if (userFolders == null) return map;
-
-        for (File folder : userFolders) {
-            File infoFile = new File(folder, "account_info.txt");
-            if (infoFile.exists()) {
-                String email = null;
-                String pass = null;
-                for (String line : Files.readAllLines(infoFile.toPath(), StandardCharsets.UTF_8)) {
-                    if (line.startsWith("Tên tài khoản:")) {
-                        email = line.substring("Tên tài khoản:".length()).trim().toLowerCase();
-                    } else if (line.startsWith("Mật khẩu:")) {
-                        pass = line.substring("Mật khẩu:".length()).trim();
-                    }
-                }
-                if (email != null && pass != null) {
-                    map.put(email, pass);
-                }
-            }
-        }
-        return map;
     }
 
     // ==================== SMTP SERVER (PORT 2525) ====================
@@ -166,19 +109,19 @@ public class LANMailServer extends JFrame {
             out.print("220 " + serverLanIp + " LAN ESMTP Server Ready\r\n");
             out.flush();
 
-            boolean authenticated = false;
+            String authenticatedUser = null;
             String sender = null;
             List<String> recipients = new ArrayList<>();
 
             String line;
             while ((line = in.readLine()) != null) {
-                log("[SMTP <- " + clientIp + "]: " + line);
+                log("[SMTP <- " + clientIp + "]: " + (line.regionMatches(true, 0, "REGISTER ", 0, 9) ? "REGISTER [ẩn]" : line));
                 String upper = line.toUpperCase().trim();
 
                 if (upper.startsWith("REGISTER ")) {
                     String[] parts = line.split(" ", 3);
-                    if (parts.length == 3 && registerUser(parts[1], parts[2])) {
-                        log("   + Đăng ký thành công tài khoản: " + parts[1] + " (Đã tạo account_info.txt)");
+                    if (parts.length == 3 && store.register(parts[1].toLowerCase(Locale.ROOT), parts[2])) {
+                        log("   + Đăng ký thành công tài khoản: " + parts[1] + " (PostgreSQL)");
                         out.print("250 Dang ky thanh cong\r\n");
                     } else {
                         out.print("550 Tai khoan da ton tai hoac sai cu phap\r\n");
@@ -194,26 +137,33 @@ public class LANMailServer extends JFrame {
                     out.flush();
                     String pass = new String(Base64.getDecoder().decode(in.readLine().trim()), StandardCharsets.UTF_8);
 
-                    Map<String, String> accounts = loadAccounts();
-                    if (accounts.containsKey(user) && accounts.get(user).equals(pass)) {
-                        authenticated = true;
+                    authenticatedUser = null;
+                    sender = null;
+                    recipients.clear();
+                    if (store.authenticate(user, pass)) {
+                        authenticatedUser = user;
                         log("   + Xác thực AUTH LOGIN thành công cho user: " + user);
                         out.print("235 2.7.0 Authentication successful\r\n");
                     } else {
                         out.print("535 5.7.8 Authentication failed\r\n");
                     }
                 } else if (upper.startsWith("MAIL FROM:")) {
-                    if (!authenticated) {
+                    sender = null;
+                    recipients.clear();
+                    String from = line.substring(10).replace("<", "").replace(">", "").trim().toLowerCase(Locale.ROOT);
+                    if (authenticatedUser == null) {
                         out.print("530 Authentication required before sending mail\r\n");
+                    } else if (!authenticatedUser.equals(from)) {
+                        out.print("553 Sender must match the authenticated account\r\n");
                     } else {
-                        sender = line.substring(10).replace("<", "").replace(">", "").trim().toLowerCase();
-                        recipients.clear();
+                        sender = from;
                         out.print("250 2.1.0 Sender OK\r\n");
                     }
                 } else if (upper.startsWith("RCPT TO:")) {
                     String rcpt = line.substring(8).replace("<", "").replace(">", "").trim().toLowerCase();
-                    Map<String, String> accounts = loadAccounts();
-                    if (!accounts.containsKey(rcpt)) {
+                    if (sender == null) {
+                        out.print("503 Send MAIL FROM first\r\n");
+                    } else if (!store.exists(rcpt)) {
                         out.print("550 5.1.1 User unknown: " + rcpt + "\r\n");
                     } else {
                         recipients.add(rcpt);
@@ -241,27 +191,23 @@ public class LANMailServer extends JFrame {
                                     subject = dataLine.substring(8).trim();
                                 }
                             } else {
+                                if (dataLine.startsWith("..")) dataLine = dataLine.substring(1);
                                 bodyBuilder.append(dataLine).append("\r\n");
                             }
                         }
 
-                        String sendTime = LocalDateTime.now().format(TIME_FMT);
-                        String bodyContent = bodyBuilder.toString().trim();
-
-                        for (String rcpt : recipients) {
-                            File userBox = new File(DATA_DIR, rcpt);
-                            if (!userBox.exists()) userBox.mkdirs();
-
-                            String formattedMail = "Thời gian gửi: " + sendTime + "\r\n"
-                                                 + "Người gửi: " + sender + "\r\n"
-                                                 + "Người nhận: " + rcpt + "\r\n"
-                                                 + "Tiêu đề: " + subject + "\r\n"
-                                                 + "Nội dung:\r\n" + bodyContent + "\r\n";
-
-                            File mailFile = new File(userBox, "mail_" + System.currentTimeMillis() + ".txt");
-                            Files.write(mailFile.toPath(), formattedMail.getBytes(StandardCharsets.UTF_8));
+                        if (dataLine == null) return;
+                        try {
+                            store.deliver(sender, recipients, subject, bodyBuilder.toString());
+                        } catch (java.sql.SQLException e) {
+                            log("[PostgreSQL] " + e.getMessage());
+                            out.print("451 4.3.0 Storage temporarily unavailable\r\n");
+                            out.flush();
+                            continue;
                         }
-                        log("   + Đã lưu thư từ [" + sender + "] gửi tới: " + recipients);
+                        sender = null;
+                        log("   + Đã lưu thư vào PostgreSQL cho: " + recipients);
+                        recipients.clear();
                         out.print("250 2.0.0 Message accepted for delivery\r\n");
                     }
                 } else if (upper.equals("QUIT")) {
@@ -302,53 +248,63 @@ public class LANMailServer extends JFrame {
 
             String currentUser = null;
             boolean authenticated = false;
-            List<File> mailFiles = new ArrayList<>();
+            List<MailStore.Message> messages = new ArrayList<>();
+            Set<Integer> deleted = new HashSet<>();
 
             String line;
             while ((line = in.readLine()) != null) {
-                log("[POP3 <- " + clientIp + "]: " + line);
+                log("[POP3 <- " + clientIp + "]: " + (line.regionMatches(true, 0, "PASS ", 0, 5) ? "PASS [ẩn]" : line));
                 String upper = line.toUpperCase().trim();
 
-                if (upper.startsWith("USER ")) {
+                if (!authenticated && upper.startsWith("USER ")) {
                     currentUser = line.substring(5).trim().toLowerCase();
-                    Map<String, String> accounts = loadAccounts();
-                    if (accounts.containsKey(currentUser)) {
+                    if (store.exists(currentUser)) {
                         out.print("+OK User accepted\r\n");
                     } else {
                         out.print("-ERR User does not exist\r\n");
                     }
-                } else if (upper.startsWith("PASS ")) {
+                } else if (!authenticated && upper.startsWith("PASS ")) {
                     String pass = line.substring(5).trim();
-                    Map<String, String> accounts = loadAccounts();
-                    if (currentUser != null && accounts.containsKey(currentUser) && accounts.get(currentUser).equals(pass)) {
+                    if (currentUser != null && store.authenticate(currentUser, pass)) {
+                        messages = store.inbox(currentUser);
                         authenticated = true;
-                        File userDir = new File(DATA_DIR, currentUser);
-                        // Chỉ lọc các file tin nhắn bắt đầu bằng "mail_" để không lấy nhầm file "account_info.txt"
-                        File[] files = userDir.listFiles((dir, name) -> name.startsWith("mail_") && name.endsWith(".txt"));
-                        mailFiles = (files != null) ? new ArrayList<>(Arrays.asList(files)) : new ArrayList<>();
-                        mailFiles.sort(Comparator.comparing(File::getName));
                         log("   + Đăng nhập POP3 thành công cho hộp thư: " + currentUser);
-                        out.print("+OK Mailbox locked and ready (" + mailFiles.size() + " messages)\r\n");
+                        out.print("+OK Mailbox ready (" + messages.size() + " messages)\r\n");
                     } else {
                         out.print("-ERR Invalid password\r\n");
                     }
+                } else if (upper.equals("QUIT")) {
+                    List<Long> ids = new ArrayList<>();
+                    for (int index : deleted) ids.add(messages.get(index).id());
+                    try {
+                        if (authenticated) store.delete(currentUser, ids);
+                        out.print("+OK POP3 server signing off\r\n");
+                    } catch (java.sql.SQLException e) {
+                        log("[PostgreSQL] " + e.getMessage());
+                        out.print("-ERR Cannot save mailbox changes\r\n");
+                    }
+                    out.flush();
+                    break;
                 } else if (!authenticated) {
                     out.print("-ERR Please login with USER and PASS first\r\n");
                 } else if (upper.equals("STAT")) {
-                    long totalBytes = mailFiles.stream().mapToLong(File::length).sum();
-                    out.print("+OK " + mailFiles.size() + " " + totalBytes + "\r\n");
+                    long totalBytes = 0;
+                    for (int i = 0; i < messages.size(); i++) {
+                        if (!deleted.contains(i)) totalBytes += messages.get(i).bytes();
+                    }
+                    out.print("+OK " + (messages.size() - deleted.size()) + " " + totalBytes + "\r\n");
                 } else if (upper.equals("LIST")) {
-                    out.print("+OK " + mailFiles.size() + " messages\r\n");
-                    for (int i = 0; i < mailFiles.size(); i++) {
-                        out.print((i + 1) + " " + mailFiles.get(i).length() + "\r\n");
+                    out.print("+OK " + (messages.size() - deleted.size()) + " messages\r\n");
+                    for (int i = 0; i < messages.size(); i++) {
+                        if (!deleted.contains(i)) out.print((i + 1) + " " + messages.get(i).bytes() + "\r\n");
                     }
                     out.print(".\r\n");
                 } else if (upper.startsWith("RETR ")) {
                     int idx = Integer.parseInt(line.substring(5).trim()) - 1;
-                    if (idx >= 0 && idx < mailFiles.size()) {
-                        File f = mailFiles.get(idx);
-                        String content = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
-                        out.print("+OK " + f.length() + " octets\r\n");
+                    if (idx >= 0 && idx < messages.size() && !deleted.contains(idx)) {
+                        MailStore.Message message = messages.get(idx);
+                        out.print("+OK " + message.bytes() + " octets\r\n");
+                        String content = message.content().replaceAll("(?m)^\\.", "..");
                         out.print(content);
                         if (!content.endsWith("\r\n")) out.print("\r\n");
                         out.print(".\r\n");
@@ -357,17 +313,13 @@ public class LANMailServer extends JFrame {
                     }
                 } else if (upper.startsWith("DELE ")) {
                     int idx = Integer.parseInt(line.substring(5).trim()) - 1;
-                    if (idx >= 0 && idx < mailFiles.size()) {
-                        mailFiles.get(idx).delete();
+                    if (idx >= 0 && idx < messages.size() && !deleted.contains(idx)) {
+                        deleted.add(idx);
                         log("   + Đã xóa bức thư số #" + (idx + 1) + " trong hộp thư của " + currentUser);
                         out.print("+OK Message deleted\r\n");
                     } else {
                         out.print("-ERR Message does not exist\r\n");
                     }
-                } else if (upper.equals("QUIT")) {
-                    out.print("+OK POP3 server signing off\r\n");
-                    out.flush();
-                    break;
                 } else {
                     out.print("-ERR Unknown POP3 command\r\n");
                 }
@@ -383,6 +335,17 @@ public class LANMailServer extends JFrame {
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> new LANMailServer().setVisible(true));
+        MailStore store = new MailStore();
+        try {
+            store.initialize();
+        } catch (Exception e) {
+            String error = "Không khởi tạo được PostgreSQL: " + e.getMessage();
+            System.err.println(error);
+            if (!GraphicsEnvironment.isHeadless()) {
+                JOptionPane.showMessageDialog(null, error, "LAN Mail Server", JOptionPane.ERROR_MESSAGE);
+            }
+            System.exit(1);
+        }
+        SwingUtilities.invokeLater(() -> new LANMailServer(store).setVisible(true));
     }
 }

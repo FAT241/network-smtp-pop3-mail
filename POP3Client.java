@@ -405,7 +405,7 @@ public class POP3Client extends JFrame {
     }
 
     private String sendCmd(PrintWriter out, BufferedReader in, String cmd) throws IOException {
-        log("CLIENT: " + cmd);
+        log("CLIENT: " + (cmd.startsWith("PASS ") ? "PASS [ẩn]" : cmd));
         out.print(cmd + "\r\n");
         out.flush();
         return readSingleLine(in);
@@ -428,7 +428,7 @@ public class POP3Client extends JFrame {
                 log("SERVER: . (Kết thúc dữ liệu)");
                 break;
             }
-            log("  " + line);
+            log("  " + (line.startsWith("..") ? line.substring(1) : line));
         }
     }
 
@@ -437,6 +437,10 @@ public class POP3Client extends JFrame {
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> new POP3Client().setVisible(true));
+        SwingUtilities.invokeLater(() -> {
+            POP3Client client = new POP3Client();
+            if (args.length > 0) client.txtAuthServer.setText(args[0]);
+            client.setVisible(true);
+        });
     }
 }
