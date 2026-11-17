@@ -13,10 +13,16 @@ import javax.crypto.spec.PBEKeySpec;
 
 final class MailStore {
     private static final SecureRandom RANDOM = new SecureRandom();
-    private final String url = System.getenv().getOrDefault("LAB3_DB_URL",
-            "jdbc:postgresql://127.0.0.1:5432/lab3_mail");
-    private final String user = System.getenv().getOrDefault("LAB3_DB_USER", "postgres");
-    private final String password = System.getenv().getOrDefault("LAB3_DB_PASSWORD", "");
+    static final String DEFAULT_URL = "jdbc:postgresql://127.0.0.1:5432/lab3_mail";
+    private final String url;
+    private final String user;
+    private final String password;
+
+    MailStore(String url, String user, String password) {
+        this.url = url;
+        this.user = user;
+        this.password = password;
+    }
 
     record Message(long id, String content) {
         int bytes() {

@@ -1,3 +1,4 @@
 /build/
 *.class
 /mail_data/
+/target/

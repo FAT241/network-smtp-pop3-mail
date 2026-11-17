@@ -334,8 +334,40 @@ public class LANMailServer extends JFrame {
         SwingUtilities.invokeLater(() -> txtServerLog.append(msg + "\n"));
     }
 
+    private static MailStore configureDatabase() {
+        String url = System.getenv().getOrDefault("LAB3_DB_URL", MailStore.DEFAULT_URL);
+        String user = System.getenv().getOrDefault("LAB3_DB_USER", "postgres");
+        String password = System.getenv("LAB3_DB_PASSWORD");
+        if (password != null || GraphicsEnvironment.isHeadless()) {
+            return new MailStore(url, user, password == null ? "" : password);
+        }
+
+        var dbUrl = new JTextField(url, 36);
+        var dbUser = new JTextField(user);
+        var dbPassword = new JPasswordField();
+        var form = new JPanel(new GridLayout(0, 1, 0, 5));
+        form.add(new JLabel("Địa chỉ JDBC PostgreSQL"));
+        form.add(dbUrl);
+        form.add(new JLabel("User PostgreSQL"));
+        form.add(dbUser);
+        form.add(new JLabel("Mật khẩu PostgreSQL"));
+        form.add(dbPassword);
+        if (JOptionPane.showConfirmDialog(null, form, "Kết nối PostgreSQL — LAN Mail Server",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) {
+            return null;
+        }
+        char[] secret = dbPassword.getPassword();
+        try {
+            return new MailStore(dbUrl.getText().strip(), dbUser.getText().strip(), new String(secret));
+        } finally {
+            Arrays.fill(secret, '\0');
+            dbPassword.setText("");
+        }
+    }
+
     public static void main(String[] args) {
-        MailStore store = new MailStore();
+        MailStore store = configureDatabase();
+        if (store == null) return;
         try {
             store.initialize();
         } catch (Exception e) {
